@@ -2,6 +2,8 @@
 /build/
 *.o
 *.obj
+.vs
+out/
 
 # Compiled binaries (CMake targets + ad-hoc test builds)
 tdgw
