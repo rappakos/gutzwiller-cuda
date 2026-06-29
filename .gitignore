@@ -1,0 +1,24 @@
+# Build
+/build/
+*.o
+*.obj
+
+# Compiled binaries (CMake targets + ad-hoc test builds)
+tdgw
+host_check
+/tests/hsc
+/tests/src_stiff
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Archives / source papers (kept out of version control)
+*.zip
+*.pdf
