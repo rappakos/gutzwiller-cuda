@@ -113,7 +113,7 @@ overnight.
 2. **U = 0 analytic limit** — coherent states stay coherent; `<b>(t)` must equal the
    exact free tight-binding `expm(-i H_sp t) psi0`. *Checked:* ~5e-7 relative.
 3. **Host vs device** — `--selftest` runs identical integrators on CPU and GPU on a
-   small lattice and diffs them (isolates parallelisation bugs). *Run on GPU + nvcc.*
+   small lattice and diffs them (isolates parallelisation bugs). *Checked* on an RTX 2060 / CUDA 13.3: host-vs-device max|Δf| ≈ 8e-8, N drift ≈ 3e-7, per-site norm ≈ 1e-6.
 4. **Reference vs SciPy** — the Python file integrates the same RHS with adaptive
    RK45 at tight tolerance; diff the CUDA output against it on a small lattice.
 5. **Physics acceptance** — see below.
@@ -134,19 +134,37 @@ Observables: `N_tot`, cloud radius `R(t)`, condensate `N_0(t) = Σ|<b_j>|²`, co
 `C(t) = Σ_<ij> <b_i>*<b_j>`, and `I_TOF(k) ∝ |w(k)|² (N_tot − N_0 + |b(k)|²)`,
 `b(k) = Σ e^{−ik·r_j} <b_j>`.
 
+## Requirements
+
+Verified toolchain (Windows): CUDA Toolkit **13.3**, Visual Studio **2022** with the
+"Desktop development with C++" workload (MSVC 19.4x, which also bundles CMake **3.31**),
+and an NVIDIA RTX 2060 (Turing, sm_75) with a current driver. Python side: 3.10+ with
+`numpy` and `scipy` (a virtualenv is enough).
+
+CUDA 13.x + MSVC note: Thrust/CCCL requires MSVC's standard-conforming preprocessor;
+`CMakeLists.txt` already forwards `/Zc:preprocessor`, so no manual step is needed.
+
 ## Build & run
 
+Windows (from a VS "x64 Native Tools" / Developer prompt, or any shell with `cmake`
+and `nvcc` on PATH):
+
 ```
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-./build/tdgw --selftest                          # host-vs-device + conservation
-./build/tdgw --L 192 --D 12 --steps 20000 --dt 0.002
-./build/host_check                               # integrator algorithm check (no GPU)
-g++ -O2 -std=c++17 tests/stiff_regime_check.cpp -o /tmp/stiff && /tmp/stiff
-python3 reference/tdgw_reference.py              # trusted oracle (needs numpy, scipy)
+cmake -B build
+cmake --build build --config Release
+
+.\build\Release\tdgw.exe --selftest                 # GPU: host-vs-device + conservation
+.\build\Release\tdgw.exe --L 192 --D 12 --steps 20000 --dt 0.002
+.\build\Release\host_check.exe                      # CPU-only integrator check
 ```
 
-Debugging/profiling (all run on Turing): `compute-sanitizer` for races/OOB,
-`ncu`/`nsys` (Nsight Compute/Systems) for kernel and timeline profiling.
+Python reference (inside a venv): `python reference\tdgw_reference.py`.
+
+Linux/macOS: `cmake --build build -j`, then `./build/tdgw --selftest`; the host-only
+tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
+
+Debugging/profiling: `compute-sanitizer` for races/OOB, `ncu` / `nsys` (Nsight) for
+kernel and timeline profiling.
 
 ## Roadmap
 
@@ -166,13 +184,10 @@ Debugging/profiling (all run on Turing): `compute-sanitizer` for races/OOB,
 - CUDA Graphs amortise per-step launch overhead once step counts get large — a late
   optimisation, not needed to start.
 
-## Migrating to your own GitHub
-
-The folder is an initialized git repo (MIT, one initial commit). To migrate:
+## Getting the code
 
 ```
-git remote add origin git@github.com:<you>/<repo>.git
-git push -u origin main
+git clone https://github.com/rappakos/gutzwiller-cuda.git
 ```
 
-The two source PDFs are intentionally not tracked (see `.gitignore`).
+The source-paper PDFs are intentionally not tracked (see `.gitignore`).
