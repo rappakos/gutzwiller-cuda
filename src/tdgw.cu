@@ -1,9 +1,9 @@
 // ===========================================================================
 //  tdgw.cu  --  Time-dependent Gutzwiller dynamics of the Bose-Hubbard model
-//               on a GPU.  Square lattice; single precision; RK4.
+//               on a GPU.  Square lattice; single precision.
 //
-//  Physics: Rapp, PRA 90, 053607 (2014), Eq.(14)-(15). Mirrors the verified
-//  Python reference in ../reference/tdgw_reference.py one-to-one.
+//  Physics: Rapp, PRA 87, 043611 (2013) [square / negative-T], Eq.(5);
+//  same EOM as PRA 90, 053607 (2014). Mirrors ../reference/tdgw_reference.py.
 //
 //      i d/dt f_m(j) = eps_m(j) f_m(j)
 //                      - conj(Phi_j) sqrt(m+1) f_{m+1}(j)
@@ -12,29 +12,27 @@
 //      Phi_j    = sum_{k in nbr(j)} J_{jk} <b_k>,  <b_j> = sum_m sqrt(m+1) conj(f_m) f_{m+1}
 //
 //  -------------------------------------------------------------------------
-//  WHY RK4 (and NOT split-step):
-//    A Strang split-step that freezes Phi during the hop sub-step is *not*
-//    number-conserving, because the mean-field hopping generator -(Phi b^dag
-//    + Phi* b) changes particle number on a site (unlike the GPE's diagonal
-//    |psi|^2 nonlinearity). Numerically the freeze-Phi scheme leaks N_tot at
-//    O(dt) -- measured ~10% over T=2 on a 6x6 test. RK4 on the *instantaneous*
-//    coupled RHS conserves N_tot to ~1e-7 and E_tot to ~1e-5 (matches the
-//    tight-tolerance Python RK45 reference). See ../tests/host_split_step_check.cpp.
-//    => integrator = explicit RK on the full RHS. On a 6 GB card the only cost
-//       is buffer count; for 192^3 use the 2N-storage low-storage RK noted below.
+//  INTEGRATORS (two; pick with --integrator):
+//    splitstep (default, production):
+//      exact-diagonal Strang split-step + midpoint-Phi predictor-corrector
+//      + per-site renormalize. The diagonal on-site phase is applied EXACTLY,
+//      so the stiff regime J/U ~ 0.0023 (U/J ~ 435) costs nothing -- where
+//      plain RK4 must resolve the fast U-phase and goes unstable (NaN).
+//      Recomputing Phi at the step midpoint drops the frozen-Phi N_tot leak
+//      from O(dt) (~7% at dt=1e-2) to ~1e-5. Uses f, ftmp, psi, phi.
+//    rk4 (cross-check):
+//      classic RK4 on the full coupled RHS. Conserves N to ~1e-7 but only in
+//      the NON-stiff limit; kept because it must agree with split-step there
+//      (an independent check). Uses 6 full buffers.
+//    Both verified in tests/split_step_prototype.cpp and tests/host_split_step_check.cpp.
 //
-//  Design (the "architecture"):
-//    * SoA, component-planar layout f[m*N + j]: for fixed m, adjacent sites
-//      are adjacent in memory -> fully coalesced warp loads/stores.
-//    * Lattice = neighbour list (nbr[d*N+j], Jdir[d]). Square (z=4), triangular
-//      (z=6), cubic (z=6) differ ONLY in make_*(); kernels never change.
-//    * RHS = three kernels: k_psi (reduce f->psi), k_phi (neighbour gather),
-//      k_rhs (local tridiagonal update). RK4 calls the RHS four times/step.
-//    * Single precision; conservation monitors are the live accuracy gauge.
+//  Design: SoA component-planar layout f[m*N + j] (coalesced); lattice as a
+//  neighbour list (square/triangular/cubic differ only in make_*()); the RHS /
+//  sub-steps are per-site kernels. Single precision; conservation monitors gauge accuracy.
 //
 //  Build:  see ../CMakeLists.txt   (targets sm_75 = RTX 2060)
-//  Run:    ./tdgw --L 192 --D 12 --steps 20000 --dt 0.002
-//          ./tdgw --selftest          (host-vs-device diff + conservation)
+//  Run:    ./tdgw --L 192 --D 12 --steps 20000 --dt 0.002 [--integrator splitstep|rk4]
+//          ./tdgw --selftest          (host-vs-device diff + conservation, both integrators)
 // ===========================================================================
 
 #include <cstdio>
@@ -55,7 +53,7 @@
 using real = float;
 using cplx = thrust::complex<float>;
 
-#define DMAX 32                       // max Fock states (compile-time, for safety checks)
+#define DMAX 32                       // max Fock states (sizes per-thread local arrays)
 #define TPB  128                      // threads per block
 
 #define CUDA_CHECK(call)                                                       \
@@ -79,7 +77,6 @@ struct Lattice {
 };
 
 // Square lattice, open boundaries. Directions +x,-x,+y,-y (z=4).
-// Anisotropic hopping J1=Jx along x, J2=Jy along y (isotropic when Jx==Jy).
 Lattice make_square(int L, real Jx, real Jy) {
   Lattice lat;
   lat.L = L; lat.N = L * L; lat.Z = 4;
@@ -131,7 +128,7 @@ __global__ void k_phi(const cplx* __restrict__ psi, const int* __restrict__ nbr,
   phi[j] = s;
 }
 
-// Local tridiagonal RHS: out = d/dt f = -i ( eps f - conj(Phi) b f - Phi b^dag f ).
+// Local tridiagonal RHS (RK4 path): out = -i ( eps f - conj(Phi) b f - Phi b^dag f ).
 __global__ void k_rhs(const cplx* __restrict__ f, const cplx* __restrict__ phi,
                       const real* __restrict__ r2, real U, real V0, real mu0,
                       cplx* __restrict__ out, int N, int D) {
@@ -148,7 +145,7 @@ __global__ void k_rhs(const cplx* __restrict__ f, const cplx* __restrict__ phi,
   }
 }
 
-// out = base + coeff * k   (build an RK stage argument).
+// out = base + coeff * k   (RK stage argument).
 __global__ void k_axpy(cplx* __restrict__ out, const cplx* __restrict__ base,
                        const cplx* __restrict__ k, real coeff, long n) {
   long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
@@ -161,6 +158,56 @@ __global__ void k_rk4_combine(cplx* __restrict__ f, const cplx* __restrict__ k1,
                               const cplx* __restrict__ k4, real h, long n) {
   long i = blockIdx.x * (long)blockDim.x + threadIdx.x;
   if (i < n) f[i] += (h / 6.f) * (k1[i] + 2.f * k2[i] + 2.f * k3[i] + k4[i]);
+}
+
+// --- split-step sub-steps --------------------------------------------------
+
+// Exact unitary rotation of the diagonal on-site part for time dt: eps_m is real
+// -> pure phase, norm-preserving, no dt penalty from large U.
+__global__ void k_phase(cplx* __restrict__ f, const real* __restrict__ r2,
+                        real U, real V0, real mu0, real dt, int N, int D) {
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= N) return;
+  real base = V0 * r2[j] - mu0;
+  for (int m = 0; m < D; ++m) {
+    real eps = 0.5f * U * m * (m - 1) + base * m;
+    real ph  = -eps * dt;
+    f[m * N + j] *= cplx(cosf(ph), sinf(ph));
+  }
+}
+
+// Hop sub-step: apply exp(-i H_hop dt) with Phi frozen, H_hop the local (DxD)
+// Hermitian tridiagonal -(conj(Phi) b + Phi b^dag). Short Taylor series; ||H||dt
+// is small (Phi ~ z J <b>). Per-thread local Fock vectors.
+__global__ void k_hop(cplx* __restrict__ f, const cplx* __restrict__ phi,
+                      real dt, int N, int D, int order) {
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= N) return;
+  cplx term[DMAX], acc[DMAX];
+  for (int m = 0; m < D; ++m) { cplx v = f[m * N + j]; term[m] = v; acc[m] = v; }
+  cplx ph = phi[j], cph = thrust::conj(ph);
+  for (int k = 1; k <= order; ++k) {
+    cplx Ht[DMAX];
+    for (int m = 0; m < D; ++m) {
+      cplx v(0.f, 0.f);
+      if (m + 1 < D) v += -cph * sqrtf((float)(m + 1)) * term[m + 1];
+      if (m - 1 >= 0) v += -ph  * sqrtf((float)m)       * term[m - 1];
+      Ht[m] = v;
+    }
+    cplx coef(0.f, -dt / (float)k);                  // (-i dt)/k
+    for (int m = 0; m < D; ++m) { term[m] = coef * Ht[m]; acc[m] += term[m]; }
+  }
+  for (int m = 0; m < D; ++m) f[m * N + j] = acc[m];
+}
+
+// Per-site renormalization: enforce sum_m |f_m(j)|^2 = 1 (the GA constraint).
+__global__ void k_renorm(cplx* __restrict__ f, int N, int D) {
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= N) return;
+  real s = 0.f;
+  for (int m = 0; m < D; ++m) s += thrust::norm(f[m * N + j]);
+  real inv = rsqrtf(s);
+  for (int m = 0; m < D; ++m) f[m * N + j] *= inv;
 }
 
 // Per-site diagnostics: number n_j, norm, local energy, bond energy.
@@ -181,7 +228,7 @@ __global__ void k_diag(const cplx* __restrict__ f, const cplx* __restrict__ psi,
 }
 
 // ---------------------------------------------------------------------------
-//  Device state + RK4 driver.
+//  Device state + integrator drivers.
 // ---------------------------------------------------------------------------
 struct Device {
   int N, D, Z; long n;                                // n = N*D total amplitudes
@@ -190,7 +237,7 @@ struct Device {
 
   void alloc(const Lattice& lat, int D_) {
     N = lat.N; D = D_; Z = lat.Z; n = (long)N * D;
-    for (cplx** p : {&f,&ftmp,&k1,&k2,&k3,&k4})        // 6 full-state buffers
+    for (cplx** p : {&f,&ftmp,&k1,&k2,&k3,&k4})        // split-step uses only f,ftmp
       CUDA_CHECK(cudaMalloc(p, sizeof(cplx) * n));
     CUDA_CHECK(cudaMalloc(&psi, sizeof(cplx) * N));
     CUDA_CHECK(cudaMalloc(&phi, sizeof(cplx) * N));
@@ -218,9 +265,7 @@ static void eval_rhs(Device& d, const cplx* src, cplx* k,
   k_rhs<<<gN, TPB>>>(src, d.phi, d.r2, U, V0, mu0, k, d.N, d.D);
 }
 
-// One classic RK4 step. Clear and recognisable; uses 6 state buffers.
-// For 192^3 on 6 GB, swap this for a 2N-storage low-storage RK (Williamson /
-// Carpenter-Kennedy): same 4th order, only 2 full buffers. Same RHS kernels.
+// Classic RK4 step (cross-check integrator). 6 buffers.
 void rk4_step(Device& d, real U, real V0, real mu0, real h) {
   long gn = (d.n + TPB - 1) / TPB;
   eval_rhs(d, d.f, d.k1, U, V0, mu0);
@@ -228,6 +273,30 @@ void rk4_step(Device& d, real U, real V0, real mu0, real h) {
   k_axpy<<<gn, TPB>>>(d.ftmp, d.f, d.k2, 0.5f * h, d.n); eval_rhs(d, d.ftmp, d.k3, U, V0, mu0);
   k_axpy<<<gn, TPB>>>(d.ftmp, d.f, d.k3,        h, d.n); eval_rhs(d, d.ftmp, d.k4, U, V0, mu0);
   k_rk4_combine<<<gn, TPB>>>(d.f, d.k1, d.k2, d.k3, d.k4, h, d.n);
+}
+
+// Exact-diagonal Strang split-step with midpoint-Phi predictor-corrector and
+// per-site renormalize (production). Stable for U/J >> 1; N_tot ~1e-5 at dt=1e-2.
+void splitstep_step(Device& d, real U, real V0, real mu0, real dt, int order = 10) {
+  int gN = (d.N + TPB - 1) / TPB;
+  k_phase<<<gN, TPB>>>(d.f, d.r2, U, V0, mu0, 0.5f * dt, d.N, d.D);
+  k_psi  <<<gN, TPB>>>(d.f, d.psi, d.N, d.D);
+  k_phi  <<<gN, TPB>>>(d.psi, d.nbr, d.Jdir, d.phi, d.N, d.Z);
+  // predictor: half-hop a copy to get Phi at the step midpoint
+  CUDA_CHECK(cudaMemcpy(d.ftmp, d.f, sizeof(cplx) * d.n, cudaMemcpyDeviceToDevice));
+  k_hop<<<gN, TPB>>>(d.ftmp, d.phi, 0.5f * dt, d.N, d.D, order);
+  k_psi<<<gN, TPB>>>(d.ftmp, d.psi, d.N, d.D);
+  k_phi<<<gN, TPB>>>(d.psi, d.nbr, d.Jdir, d.phi, d.N, d.Z);   // corrected Phi
+  // full hop with midpoint Phi, second half phase, renormalize
+  k_hop  <<<gN, TPB>>>(d.f, d.phi, dt, d.N, d.D, order);
+  k_phase<<<gN, TPB>>>(d.f, d.r2, U, V0, mu0, 0.5f * dt, d.N, d.D);
+  k_renorm<<<gN, TPB>>>(d.f, d.N, d.D);
+}
+
+// Generic one-step dispatch.
+void step(Device& d, const std::string& integ, real U, real V0, real mu0, real dt) {
+  if (integ == "rk4") rk4_step(d, U, V0, mu0, dt);
+  else                splitstep_step(d, U, V0, mu0, dt);
 }
 
 // Named functor: an extended __device__ lambda cannot have its return type
@@ -246,8 +315,7 @@ Diag diagnostics(Device& d, real U, real V0) {
   double Eloc = thrust::reduce(eloc, eloc + d.N, 0.0);
   double Ebnd = thrust::reduce(ebond, ebond + d.N, 0.0);
   float  mdev = thrust::transform_reduce(
-      nrm, nrm + d.N, AbsDevOne(),
-      0.0f, thrust::maximum<real>());
+      nrm, nrm + d.N, AbsDevOne(), 0.0f, thrust::maximum<real>());
   return {Ntot, Eloc + Ebnd, (double)mdev};
 }
 
@@ -275,8 +343,7 @@ std::vector<cplx> coherent_bump(const Lattice& lat, int D, real amp, real width)
 }
 
 // ===========================================================================
-//  SELF-TEST: host RK4 mirror, diffed against the device.  Isolates
-//  parallelisation bugs (the host code is obviously serial-correct).
+//  SELF-TEST: host mirror of BOTH integrators, diffed against the device.
 // ===========================================================================
 namespace host {
 using hc = std::complex<float>;
@@ -286,12 +353,14 @@ void psi(const std::vector<hc>& f, std::vector<hc>& p, int N, int D) {
     for (int m = 0; m < D-1; ++m) s += sqrtf((float)(m+1))*std::conj(f[FI(m,j,N)])*f[FI(m+1,j,N)];
     p[j] = s; }
 }
+void phi(const std::vector<hc>& p, const Lattice& lat, std::vector<hc>& ph) {
+  for (int j = 0; j < lat.N; ++j) { hc s(0,0);
+    for (int d = 0; d < lat.Z; ++d) { int k = lat.nbr[d*lat.N+j]; if (k>=0) s += lat.Jdir[d]*p[k]; }
+    ph[j] = s; }
+}
 void rhs(const std::vector<hc>& f, const Lattice& lat, real U, real V0, real mu0,
          int D, std::vector<hc>& out) {
-  int N = lat.N; std::vector<hc> p(N), ph(N); psi(f, p, N, D);
-  for (int j = 0; j < N; ++j) { hc s(0,0);
-    for (int d = 0; d < lat.Z; ++d) { int k = lat.nbr[d*N+j]; if (k>=0) s += lat.Jdir[d]*p[k]; }
-    ph[j] = s; }
+  int N = lat.N; std::vector<hc> p(N), ph(N); psi(f, p, N, D); phi(p, lat, ph);
   for (int j = 0; j < N; ++j) { real base = V0*lat.r2[j]-mu0;
     for (int m = 0; m < D; ++m) { hc v(0,0); real eps = 0.5f*U*m*(m-1)+base*m;
       v += eps*f[FI(m,j,N)];
@@ -307,46 +376,79 @@ void rk4(std::vector<hc>& f, const Lattice& lat, real U, real V0, real mu0, real
   for (size_t i=0;i<n;++i) t[i]=f[i]+h*k3[i];      rhs(t,lat,U,V0,mu0,D,k4);
   for (size_t i=0;i<n;++i) f[i]+=(h/6.f)*(k1[i]+2.f*k2[i]+2.f*k3[i]+k4[i]);
 }
+void phase(std::vector<hc>& f, const Lattice& lat, real U, real V0, real mu0, real dt, int D) {
+  for (int j = 0; j < lat.N; ++j) { real base = V0*lat.r2[j]-mu0;
+    for (int m = 0; m < D; ++m) { real e = 0.5f*U*m*(m-1)+base*m, p=-e*dt;
+      f[FI(m,j,lat.N)] *= hc(cosf(p), sinf(p)); } }
+}
+void hop(std::vector<hc>& f, const std::vector<hc>& ph, real dt, int N, int D, int order) {
+  for (int j = 0; j < N; ++j) { std::vector<hc> t(D), a(D), H(D);
+    for (int m=0;m<D;++m){ t[m]=f[FI(m,j,N)]; a[m]=t[m]; } hc P=ph[j], cP=std::conj(P);
+    for (int k=1;k<=order;++k){ for(int m=0;m<D;++m){ hc v(0,0);
+        if(m+1<D)v+=-cP*sqrtf((float)(m+1))*t[m+1];
+        if(m-1>=0)v+=-P*sqrtf((float)m)*t[m-1]; H[m]=v; }
+      hc cf(0.f,-dt/(float)k); for(int m=0;m<D;++m){ t[m]=cf*H[m]; a[m]+=t[m]; } }
+    for(int m=0;m<D;++m) f[FI(m,j,N)]=a[m]; }
+}
+void renorm(std::vector<hc>& f, int N, int D) {
+  for (int j=0;j<N;++j){ double s=0; for(int m=0;m<D;++m)s+=std::norm(f[FI(m,j,N)]);
+    float inv=1.0f/sqrtf((float)s); for(int m=0;m<D;++m)f[FI(m,j,N)]*=inv; }
+}
+void ss(std::vector<hc>& f, const Lattice& lat, real U, real V0, real mu0, real dt, int D, int order=10) {
+  std::vector<hc> p(lat.N), ph(lat.N);
+  phase(f,lat,U,V0,mu0,0.5f*dt,D);
+  psi(f,p,lat.N,D); phi(p,lat,ph);
+  std::vector<hc> fh=f; hop(fh,ph,0.5f*dt,lat.N,D,order);   // predictor
+  psi(fh,p,lat.N,D); phi(p,lat,ph);                        // midpoint Phi
+  hop(f,ph,dt,lat.N,D,order);
+  phase(f,lat,U,V0,mu0,0.5f*dt,D);
+  renorm(f,lat.N,D);
+}
 } // namespace host
 
 int run_selftest() {
-  printf("SELF-TEST  (host RK4 vs device RK4)\n");
+  printf("SELF-TEST  (host vs device; both integrators; non-stiff)\n");
   const int L = 8, D = 8, steps = 200;
   const real U = -0.5f, V0 = -2.5e-3f, mu0 = 0.f, dt = 2e-3f;
   Lattice lat = make_square(L, 1.0f, 1.0f);
-
   std::vector<cplx> f0 = coherent_bump(lat, D, 0.8f, 3.0f);
-  std::vector<host::hc> fh((size_t)lat.N * D);
-  std::memcpy(fh.data(), f0.data(), sizeof(cplx) * lat.N * D);     // identical layout
+  size_t sz = (size_t)lat.N * D;
 
   Device dev; dev.alloc(lat, D);
-  CUDA_CHECK(cudaMemcpy(dev.f, f0.data(), sizeof(cplx) * lat.N * D, cudaMemcpyHostToDevice));
+  int rc = 0;
+  std::vector<host::hc> dev_res[2];
+  const char* names[2] = {"split-step", "RK4       "};
 
-  Diag d0 = diagnostics(dev, U, V0);
-  for (int s = 0; s < steps; ++s) {
-    rk4_step(dev, U, V0, mu0, dt);
-    host::rk4(fh, lat, U, V0, mu0, dt, D);
+  for (int which = 0; which < 2; ++which) {
+    std::vector<host::hc> fh(sz);
+    std::memcpy(fh.data(), f0.data(), sizeof(cplx) * sz);
+    CUDA_CHECK(cudaMemcpy(dev.f, f0.data(), sizeof(cplx) * sz, cudaMemcpyHostToDevice));
+    Diag d0 = diagnostics(dev, U, V0);
+    for (int s = 0; s < steps; ++s) {
+      if (which == 0) { splitstep_step(dev, U, V0, mu0, dt); host::ss(fh, lat, U, V0, mu0, dt, D); }
+      else            { rk4_step(dev, U, V0, mu0, dt);       host::rk4(fh, lat, U, V0, mu0, dt, D); }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+    Diag d1 = diagnostics(dev, U, V0);
+    std::vector<cplx> fd(sz);
+    CUDA_CHECK(cudaMemcpy(fd.data(), dev.f, sizeof(cplx) * sz, cudaMemcpyDeviceToHost));
+    std::vector<host::hc> fdv(sz); double md = 0.0;
+    for (size_t i = 0; i < sz; ++i) {
+      fdv[i] = std::complex<float>(fd[i].real(), fd[i].imag());
+      md = std::max(md, (double)std::abs(fdv[i] - fh[i]));
+    }
+    dev_res[which] = fdv;
+    printf("  [%s] host-vs-device max|df|=%.3e   |dN|=%.3e   |norm-1|=%.3e\n",
+           names[which], md, std::abs(d1.N - d0.N), d1.max_norm_dev);
+    rc |= (md < 1e-4 && std::abs(d1.N - d0.N) < 1e-3 && d1.max_norm_dev < 1e-4) ? 0 : 1;
   }
-  CUDA_CHECK(cudaDeviceSynchronize());
-  Diag d1 = diagnostics(dev, U, V0);
-
-  std::vector<cplx> fd((size_t)lat.N * D);
-  CUDA_CHECK(cudaMemcpy(fd.data(), dev.f, sizeof(cplx) * lat.N * D, cudaMemcpyDeviceToHost));
-
-  double maxdiff = 0.0;
-  for (size_t i = 0; i < fd.size(); ++i)
-    maxdiff = std::max(maxdiff,
-        (double)std::abs(std::complex<float>(fd[i].real(), fd[i].imag()) - fh[i]));
-
-  printf("  %dx%d, D=%d, %d steps, dt=%g\n", L, L, D, steps, dt);
-  printf("  host vs device   max|df|   = %.3e   (expect ~1e-6, FP32 reorder)\n", maxdiff);
-  printf("  N_tot drift      |dN|      = %.3e\n", std::abs(d1.N - d0.N));
-  printf("  E_tot drift      |dE|      = %.3e\n", std::abs(d1.E - d0.E));
-  printf("  max |site-norm-1|          = %.3e\n", d1.max_norm_dev);
+  double cross = 0.0;
+  for (size_t i = 0; i < sz; ++i) cross = std::max(cross, (double)std::abs(dev_res[0][i] - dev_res[1][i]));
+  printf("  split-step vs RK4 (device) max|df|=%.3e   (must agree in non-stiff limit)\n", cross);
+  rc |= (cross < 1e-3) ? 0 : 1;
   dev.free_all();
-  bool ok = maxdiff < 1e-4 && std::abs(d1.N - d0.N) < 1e-3 && d1.max_norm_dev < 1e-4;
-  printf("  --> %s\n", ok ? "PASS" : "FAIL");
-  return ok ? 0 : 1;
+  printf("  --> %s\n", rc == 0 ? "PASS" : "FAIL");
+  return rc;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +456,7 @@ int main(int argc, char** argv) {
   int L = 192, D = 12, steps = 2000, diag_every = 200;
   real dt = 2e-3f, U = -0.5f, V0 = -2.5e-3f, mu0 = 0.f, Jx = 1.f, Jy = 1.f;
   bool selftest = false;
+  std::string integ = "splitstep";
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto nf = [&](real& v) { v = atof(argv[++i]); };
@@ -364,16 +467,19 @@ int main(int argc, char** argv) {
     else if (a == "--U") nf(U);           else if (a == "--V0") nf(V0);
     else if (a == "--Jx") nf(Jx);         else if (a == "--Jy") nf(Jy);
     else if (a == "--diag") ni(diag_every);
+    else if (a == "--integrator") integ = argv[++i];
   }
   if (D > DMAX) { fprintf(stderr, "D > DMAX (%d)\n", DMAX); return 1; }
+  if (integ != "splitstep" && integ != "rk4") {
+    fprintf(stderr, "--integrator must be splitstep or rk4\n"); return 1;
+  }
   if (selftest) return run_selftest();
 
   Lattice lat = make_square(L, Jx, Jy);
   printf("square %dx%d  N=%d  D=%d  Jx=%g Jy=%g  U=%g V0=%g  dt=%g  steps=%d\n",
          L, L, lat.N, D, Jx, Jy, U, V0, dt, steps);
-  printf("state buffers: 6 x %.1f MB = %.2f GB (complex float, RK4)\n",
-         sizeof(cplx) * (double)lat.N * D / 1e6,
-         6.0 * sizeof(cplx) * (double)lat.N * D / 1e9);
+  printf("integrator: %s   state buffer: %.1f MB each (RK4 holds 6; split-step ~2)\n",
+         integ.c_str(), sizeof(cplx) * (double)lat.N * D / 1e6);
 
   Device dev; dev.alloc(lat, D);
   std::vector<cplx> f0 = coherent_bump(lat, D, 0.8f, 0.15f * L);
@@ -382,7 +488,7 @@ int main(int argc, char** argv) {
   Diag d0 = diagnostics(dev, U, V0);
   printf("step %6d   N=%.6f   E=%.6f   |norm-1|=%.2e\n", 0, d0.N, d0.E, d0.max_norm_dev);
   for (int s = 1; s <= steps; ++s) {
-    rk4_step(dev, U, V0, mu0, dt);
+    step(dev, integ, U, V0, mu0, dt);
     if (s % diag_every == 0) {
       Diag d = diagnostics(dev, U, V0);
       printf("step %6d   N=%.6f   E=%.6f   |norm-1|=%.2e   dN=%.2e\n",

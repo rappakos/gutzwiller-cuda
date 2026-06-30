@@ -33,6 +33,8 @@ src/tdgw.cu                     GPU solver (kernels + integrator + diagnostics +
 reference/tdgw_reference.py     trusted CPU oracle (NumPy/SciPy, small lattices)
 tests/host_split_step_check.cpp host-only conservation/order check (g++, no CUDA)
 tests/stiff_regime_check.cpp    host-only split-step vs RK4 in the stiff U/J regime (g++)
+tests/split_step_prototype.cpp  host-only split-step numerics (predictor-corrector)
+analysis/tof.py                 time-of-flight image generator (numpy.fft, post-processing)
 CMakeLists.txt                  modern CMake; targets sm_75
 ```
 
@@ -78,21 +80,22 @@ phase is then the fast timescale, which flips the conclusion. Comparing both at 
 In the real regime plain RK4 must resolve the fast U-phase and blows up at any
 practical dt, while the **exact-diagonal split-step treats that phase exactly**.
 
-**Conclusion.** Production integrator = exact-diagonal Strang split-step + per-site
-renormalize — which is what the original 2013 code used (δt = 0.1 ns, N drift
-< 0.2% at t = 80 ms). RK4 is kept only as a non-stiff, small-dt cross-check (the two
-must agree in the non-stiff limit — itself a good test). Split-step also drops the
-four RK4 stage buffers, so it is the better fit for the 6 GB card.
+**Conclusion.** Production integrator = exact-diagonal Strang split-step with a
+**midpoint-Φ predictor-corrector** + per-site renormalize. The predictor (recompute Φ at
+the step midpoint) is the key move: it drops the frozen-Φ `N_tot` leak from O(dt) (~7% at
+dt=1e-2) to ~1e-5, so the tiny-dt crutch of the 2013 code (δt = 0.1 ns) isn't needed. RK4
+is kept as a non-stiff cross-check — the two must agree there, which is itself a test.
+Choose with `--integrator splitstep|rk4` (split-step is the default); split-step uses only
+`f`, `ftmp`, `psi`, `phi` vs RK4's 6 buffers, so it also fits 6 GB better.
 
-> **Pending code change:** `src/tdgw.cu` currently ships the RK4 path as default.
-> Switching the default to split-step (+ per-site renormalize) is the next change;
-> both share the same `k_psi`/`k_phi` RHS kernels, so it adds the diagonal-phase and
-> hop kernels and a renormalize kernel. Deferred to the personal repo.
+*Implemented and GPU-validated* (RTX 2060 / CUDA 13.3, `--selftest`): split-step
+host-vs-device max|Δf| ≈ 2e-5, N drift ≈ 2e-4; RK4 ≈ 8e-8 / 3e-7; the two agree to ≈ 2e-5
+in the non-stiff limit.
 
 ## Memory budget on a 6 GB RTX 2060 (single precision, `cplx = complex<float>`)
 
 State buffer = `N · D · 8 bytes`. RK4 holds 6 full buffers; split-step needs only
-`f`, `psi`, `phi` (+ one small hop temp), so the RK4 figures below are the upper bound.
+`f` and `ftmp` (plus `psi`, `phi`), so the RK4 figures below are the upper bound.
 
 | lattice | N | per buffer (D=12) | RK4 (6 buffers) | split-step (~2–3) |
 |---|---|---|---|---|
@@ -112,8 +115,9 @@ overnight.
    holds all three to ~1e-8.
 2. **U = 0 analytic limit** — coherent states stay coherent; `<b>(t)` must equal the
    exact free tight-binding `expm(-i H_sp t) psi0`. *Checked:* ~5e-7 relative.
-3. **Host vs device** — `--selftest` runs identical integrators on CPU and GPU on a
-   small lattice and diffs them (isolates parallelisation bugs). *Checked* on an RTX 2060 / CUDA 13.3: host-vs-device max|Δf| ≈ 8e-8, N drift ≈ 3e-7, per-site norm ≈ 1e-6.
+3. **Host vs device** — `--selftest` runs both integrators on CPU and GPU and diffs them
+   (isolates parallelisation bugs). *Checked* on RTX 2060 / CUDA 13.3: RK4 max|Δf| ≈ 8e-8;
+   split-step ≈ 2e-5; the two agree to ≈ 2e-5 in the non-stiff limit.
 4. **Reference vs SciPy** — the Python file integrates the same RHS with adaptive
    RK45 at tight tolerance; diff the CUDA output against it on a small lattice.
 5. **Physics acceptance** — see below.
@@ -168,9 +172,9 @@ kernel and timeline profiling.
 
 ## Roadmap
 
-1. Switch the default integrator to exact-diagonal split-step (+ per-site renormalize).
+1. ~~Exact-diagonal split-step integrator~~ — **done** (`--integrator splitstep`, default; midpoint-Φ predictor-corrector).
 2. Real compressed-Mott initial state via self-consistent / imaginary-time GA.
-3. Observables `N_0(t)`, `C(t)`, TOF; reproduce protocol (a) above.
+3. `--dump` the `<b_j>` field → observables `N_0(t)`, `C(t)`, TOF via `analysis/tof.py`; reproduce protocol (a).
 4. Triangular lattice — add `make_triangular()` (z=6, `J1=J3>J2`); kernels unchanged.
 5. 3D cubic 192³ — add `make_cubic()`, low-storage buffers. (Bipartite: no frustration.)
 
