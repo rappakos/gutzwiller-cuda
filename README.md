@@ -31,6 +31,7 @@ local tridiagonal-in-`m` operator plus a nearest-neighbour gather for `Phi`.
 ```
 src/tdgw.cu                     GPU solver (kernels + integrator + diagnostics + selftest)
 reference/tdgw_reference.py     trusted CPU oracle (NumPy/SciPy, small lattices)
+reference/ground_state.py       self-consistent GA ground state (compressed Mott + seed)
 tests/host_split_step_check.cpp host-only conservation/order check (g++, no CUDA)
 tests/stiff_regime_check.cpp    host-only split-step vs RK4 in the stiff U/J regime (g++)
 tests/split_step_prototype.cpp  host-only split-step numerics (predictor-corrector)
@@ -90,7 +91,8 @@ Choose with `--integrator splitstep|rk4` (split-step is the default); split-step
 
 *Implemented and GPU-validated* (RTX 2060 / CUDA 13.3, `--selftest`): split-step
 host-vs-device max|Δf| ≈ 2e-5, N drift ≈ 2e-4; RK4 ≈ 8e-8 / 3e-7; the two agree to ≈ 2e-5
-in the non-stiff limit.
+in the non-stiff limit. On the full 192² lattice at U/J = 200, split-step ran 2000 steps
+stably with N_tot conserved to ~0.03%, while RK4 diverged to NaN by step 200.
 
 ## Memory budget on a 6 GB RTX 2060 (single precision, `cplx = complex<float>`)
 
@@ -133,7 +135,10 @@ The milestone that says the project is alive again: run **protocol (a)** (final
 
 Spec: 80²–160² sites; `D = 7` (max occupation `m_c = 6`); `N_tot ≈ 1920`; initial
 state a compressed Mott insulator (n=1 core + thin superfluid shell) from a
-self-consistent Gutzwiller solve, `J/U ≈ 0.0023`, `mu0/U ≈ 0.15` at t₀ = 20 ms.
+self-consistent Gutzwiller solve, `J/U ≈ 0.0023`, `mu0/U ≈ 0.15` at t₀ = 20 ms. A perfect
+deep-Mott state has ⟨b_j⟩ = 0 — a dynamical fixed point — so a small seed (the thin SF
+shell) is needed to nucleate post-quench coherence (verified in `reference/ground_state.py`:
+unseeded stays frozen, seeded develops N₀).
 Observables: `N_tot`, cloud radius `R(t)`, condensate `N_0(t) = Σ|<b_j>|²`, coherence
 `C(t) = Σ_<ij> <b_i>*<b_j>`, and `I_TOF(k) ∝ |w(k)|² (N_tot − N_0 + |b(k)|²)`,
 `b(k) = Σ e^{−ik·r_j} <b_j>`.
@@ -173,7 +178,9 @@ kernel and timeline profiling.
 ## Roadmap
 
 1. ~~Exact-diagonal split-step integrator~~ — **done** (`--integrator splitstep`, default; midpoint-Φ predictor-corrector).
-2. Real compressed-Mott initial state via self-consistent / imaginary-time GA.
+2. Compressed-Mott initial state — Python solver done (`reference/ground_state.py`, verified
+   stationary); next add a host `compressed_mott(+seed)` initializer to `tdgw.cu` (atomic-limit
+   Fock |n_j> per site + small seed; no GPU eigensolver needed at deep-Mott params).
 3. `--dump` the `<b_j>` field → observables `N_0(t)`, `C(t)`, TOF via `analysis/tof.py`; reproduce protocol (a).
 4. Triangular lattice — add `make_triangular()` (z=6, `J1=J3>J2`); kernels unchanged.
 5. 3D cubic 192³ — add `make_cubic()`, low-storage buffers. (Bipartite: no frustration.)
