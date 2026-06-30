@@ -15,8 +15,10 @@ Each site's whole Fock vector rotates by a single phase e^{-i E_j t}, so <b_j>
 (hence Phi, n_j, everything observable) is time-independent. We confirm n_j and
 N_tot do not drift under real-time evolution.
 """
+import argparse
 import numpy as np
 from tdgw_reference import square_lattice, TDGW
+from fieldio import write_field
 
 
 def gs_solve(A, r2, U, J_unused, mu0, V0, D, iters=600, mix=0.3, tol=1e-10, seed=0.05):
@@ -25,7 +27,10 @@ def gs_solve(A, r2, U, J_unused, mu0, V0, D, iters=600, mix=0.3, tol=1e-10, seed
     eps = (0.5 * U * (m * (m - 1)))[None, :] + (V0 * r2 - mu0)[:, None] * m[None, :]  # (N,D)
     cup = np.sqrt(np.arange(1, D))                                  # sqrt(m+1)
 
-    # LDA initial guess: Fock |n_j> at the atomic-limit minimum, + small seed
+    # LDA initial guess: Fock |n_j> at the atomic-limit minimum, + small seed.
+    # TODO: a standalone lda_state() (homogeneous n(mu_eff) builder) could provide this
+    # guess directly; LDA nails the density but misses the proximity SF shell, so the
+    # self-consistency sweeps below are still needed for the (dynamically important) shell.
     f = np.zeros((N, D))
     n0 = np.argmin(eps, axis=1)
     f[np.arange(N), n0] = 1.0
@@ -63,31 +68,36 @@ def gs_solve(A, r2, U, J_unused, mu0, V0, D, iters=600, mix=0.3, tol=1e-10, seed
 
 
 if __name__ == "__main__":
-    L, D = 24, 7
-    U, J, mu0 = 1.0, 0.0023, 0.15
-    V0 = 0.0023                          # trap; n=1 edge near r^2 = mu0/V0 ~ 65
+    ap = argparse.ArgumentParser(description="Compressed-Mott GA ground state")
+    ap.add_argument("--L", type=int, default=24)
+    ap.add_argument("--D", type=int, default=7)
+    ap.add_argument("--U", type=float, default=1.0)
+    ap.add_argument("--J", type=float, default=0.0023)
+    ap.add_argument("--mu0", type=float, default=0.15)
+    ap.add_argument("--V0", type=float, default=0.0023, help="trap (compression); >0 confines")
+    ap.add_argument("--seed", type=float, default=0.05)
+    ap.add_argument("--dump", help="write the initial state to a field file (for tdgw --load)")
+    ap.add_argument("--no-check", action="store_true", help="skip the stationarity check")
+    args = ap.parse_args()
+    L, D, U, J, mu0, V0 = args.L, args.D, args.U, args.J, args.mu0, args.V0
     A, r2 = square_lattice(L, J, J)
     print(f"deep-lattice ground state: {L}x{L}, D={D}, J/U={J/U:.4f}, mu0/U={mu0:.3f}, V0={V0}")
-    f = gs_solve(A, r2, U, J, mu0, V0, D)
+    f = gs_solve(A, r2, U, J, mu0, V0, D, seed=args.seed)
 
     n = np.sum(np.arange(D)[None, :] * np.abs(f) ** 2, axis=1)
     psi = np.sum(np.conj(f[:, :-1]) * np.sqrt(np.arange(1, D))[None, :] * f[:, 1:], axis=1)
     Ntot = float(np.sum(n)); N0 = float(np.sum(np.abs(psi) ** 2))
-    cx = (L - 1) / 2.0
-    r = np.sqrt(r2); Rcloud = float(np.sqrt(np.sum(r2 * n) / Ntot))
-    nc = n.reshape(L, L)[L // 2, L // 2]
-    print(f"  central density n_center = {nc:.4f}")
-    print(f"  N_tot = {Ntot:.1f}   condensate N0 = {N0:.3f}   N0/N = {N0/Ntot:.2e}")
-    print(f"  cloud radius (rms) = {Rcloud:.2f} sites")
-    print(f"  n=1 plateau sites = {int(np.sum(np.round(n)==1))}, |psi|>1e-3 shell sites = {int(np.sum(np.abs(psi)>1e-3))}")
+    Rcloud = float(np.sqrt(np.sum(r2 * n) / Ntot)); nc = n.reshape(L, L)[L // 2, L // 2]
+    print(f"  central n={nc:.4f}  N_tot={Ntot:.1f}  N0={N0:.3f}  N0/N={N0/Ntot:.2e}  R_rms={Rcloud:.2f}")
+    print(f"  n=1 sites={int(np.sum(np.round(n)==1))}  shell |psi|>1e-3 sites={int(np.sum(np.abs(psi)>1e-3))}")
 
-    # --- stationarity: evolve with real-time TDGW (same params), expect no drift ---
-    print("  stationarity check (real-time TDGW, same params, T=2):")
-    model = TDGW(A, r2, U, V0, mu0, D)
-    t, fs = model.evolve(f, T=2.0, n_eval=5, rtol=1e-9, atol=1e-11)
-    n0_profile = n
-    max_dn = max(np.max(np.abs(np.sum(np.arange(D)[None, :] * np.abs(ft) ** 2, axis=1) - n0_profile)) for ft in fs)
-    dN = max(abs(float(np.sum(np.sum(np.arange(D)[None, :] * np.abs(ft) ** 2, axis=1))) - Ntot) for ft in fs)
-    print(f"    max |n_j(t) - n_j(0)| = {max_dn:.2e}")
-    print(f"    max |N_tot(t) - N_tot(0)| = {dN:.2e}")
-    print("    --> " + ("STATIONARY (PASS)" if max_dn < 1e-3 else "drifts (check)"))
+    if args.dump:
+        write_field(args.dump, f.astype(complex), L, D)
+        print(f"  dumped initial state -> {args.dump}")
+
+    if not args.no_check and L <= 32:
+        print("  stationarity check (real-time TDGW, same params, T=2):")
+        model = TDGW(A, r2, U, V0, mu0, D)
+        t, fs = model.evolve(f, T=2.0, n_eval=5, rtol=1e-9, atol=1e-11)
+        max_dn = max(np.max(np.abs(np.sum(np.arange(D)[None, :] * np.abs(ft) ** 2, axis=1) - n)) for ft in fs)
+        print(f"    max |n_j(t)-n_j(0)| = {max_dn:.2e}  --> " + ("STATIONARY (PASS)" if max_dn < 1e-3 else "drifts (check)"))

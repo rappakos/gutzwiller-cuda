@@ -20,25 +20,27 @@ Usage
     python tof.py --demo --out tof_demo.png            # synthetic protocol-(a) field
     python tof.py --in psi_dump.bin --out tof.png      # field dumped by tdgw --dump
 
-Dump format consumed by --in (little-endian), matching the planned tdgw `--dump`:
-    int32   L
-    float32 N_tot
-    float32 N0
-    2*L*L  float32   psi interleaved (re, im), row-major with index j = x + L*y
+Field format consumed by --in is the shared fieldio format (see reference/fieldio.py):
+    int32 L, int32 D, then N*D complex64 as f[m*N + j]. Written by tdgw --dump and
+    by ground_state.py --dump. tof reduces f to psi = <b_j> and forms I_TOF.
 """
 import argparse
+import os
+import sys
 import numpy as np
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "reference"))
+from fieldio import read_field
 
 
 # --------------------------------------------------------------------------
 def load_field(path):
-    with open(path, "rb") as fh:
-        L = int(np.fromfile(fh, dtype="<i4", count=1)[0])
-        Ntot = float(np.fromfile(fh, dtype="<f4", count=1)[0])
-        N0 = float(np.fromfile(fh, dtype="<f4", count=1)[0])
-        flat = np.fromfile(fh, dtype="<f4", count=2 * L * L)
-    psi = (flat[0::2] + 1j * flat[1::2]).reshape(L, L)   # psi[y, x]
-    return psi, Ntot, N0
+    """Read a field file (fieldio format) and reduce to (psi[y,x], N_tot, N0)."""
+    f, L, D = read_field(path)                       # f: (N, D), index f[j, m]
+    cup = np.sqrt(np.arange(1, D))
+    psi = np.sum(np.conj(f[:, :-1]) * cup[None, :] * f[:, 1:], axis=1)   # <b_j>, (N,)
+    n = np.sum(np.arange(D)[None, :] * np.abs(f) ** 2, axis=1)
+    Ntot = float(np.sum(n)); N0 = float(np.sum(np.abs(psi) ** 2))
+    return psi.reshape(L, L), Ntot, N0               # psi[y, x] (j = x + L*y)
 
 
 def synth_field(L=128, sigma_frac=0.18, n_center=1.0, condensate_frac=0.7):

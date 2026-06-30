@@ -43,6 +43,7 @@
 #include <complex>
 #include <string>
 #include <algorithm>
+#include <cstdint>
 
 #include <thrust/complex.h>
 #include <thrust/device_ptr.h>
@@ -342,6 +343,30 @@ std::vector<cplx> coherent_bump(const Lattice& lat, int D, real amp, real width)
   return f;
 }
 
+// ---------------------------------------------------------------------------
+//  Field I/O. Shared binary format with reference/fieldio.py and analysis/tof.py:
+//    int32 L, int32 D, then N*D complex<float> as f[m*N + j] (re,im interleaved).
+// ---------------------------------------------------------------------------
+static void write_field(const std::string& path, const std::vector<cplx>& f, int L, int D) {
+  FILE* fp = fopen(path.c_str(), "wb");
+  if (!fp) { fprintf(stderr, "cannot open %s for writing\n", path.c_str()); std::exit(1); }
+  int32_t hdr[2] = {L, D};
+  fwrite(hdr, sizeof(int32_t), 2, fp);
+  fwrite(f.data(), sizeof(cplx), (size_t)L * L * D, fp);
+  fclose(fp);
+}
+static std::vector<cplx> read_field(const std::string& path, int& L, int& D) {
+  FILE* fp = fopen(path.c_str(), "rb");
+  if (!fp) { fprintf(stderr, "cannot open %s for reading\n", path.c_str()); std::exit(1); }
+  int32_t hdr[2];
+  if (fread(hdr, sizeof(int32_t), 2, fp) != 2) { fprintf(stderr, "bad header %s\n", path.c_str()); std::exit(1); }
+  L = hdr[0]; D = hdr[1];
+  std::vector<cplx> f((size_t)L * L * D);
+  if (fread(f.data(), sizeof(cplx), f.size(), fp) != f.size()) { fprintf(stderr, "short read %s\n", path.c_str()); std::exit(1); }
+  fclose(fp);
+  return f;
+}
+
 // ===========================================================================
 //  SELF-TEST: host mirror of BOTH integrators, diffed against the device.
 // ===========================================================================
@@ -457,6 +482,7 @@ int main(int argc, char** argv) {
   real dt = 2e-3f, U = -0.5f, V0 = -2.5e-3f, mu0 = 0.f, Jx = 1.f, Jy = 1.f;
   bool selftest = false;
   std::string integ = "splitstep";
+  std::string loadpath, dumppath;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto nf = [&](real& v) { v = atof(argv[++i]); };
@@ -468,12 +494,22 @@ int main(int argc, char** argv) {
     else if (a == "--Jx") nf(Jx);         else if (a == "--Jy") nf(Jy);
     else if (a == "--diag") ni(diag_every);
     else if (a == "--integrator") integ = argv[++i];
+    else if (a == "--load") loadpath = argv[++i];
+    else if (a == "--dump") dumppath = argv[++i];
   }
   if (D > DMAX) { fprintf(stderr, "D > DMAX (%d)\n", DMAX); return 1; }
   if (integ != "splitstep" && integ != "rk4") {
     fprintf(stderr, "--integrator must be splitstep or rk4\n"); return 1;
   }
   if (selftest) return run_selftest();
+
+  std::vector<cplx> f0;
+  if (!loadpath.empty()) {                       // load initial state (sets L, D)
+    int Lf, Df; f0 = read_field(loadpath, Lf, Df);
+    L = Lf; D = Df;
+    printf("loaded initial state from %s (L=%d, D=%d)\n", loadpath.c_str(), L, D);
+    if (D > DMAX) { fprintf(stderr, "loaded D > DMAX (%d)\n", DMAX); return 1; }
+  }
 
   Lattice lat = make_square(L, Jx, Jy);
   printf("square %dx%d  N=%d  D=%d  Jx=%g Jy=%g  U=%g V0=%g  dt=%g  steps=%d\n",
@@ -482,7 +518,7 @@ int main(int argc, char** argv) {
          integ.c_str(), sizeof(cplx) * (double)lat.N * D / 1e6);
 
   Device dev; dev.alloc(lat, D);
-  std::vector<cplx> f0 = coherent_bump(lat, D, 0.8f, 0.15f * L);
+  if (loadpath.empty()) f0 = coherent_bump(lat, D, 0.8f, 0.15f * L);
   CUDA_CHECK(cudaMemcpy(dev.f, f0.data(), sizeof(cplx) * lat.N * D, cudaMemcpyHostToDevice));
 
   Diag d0 = diagnostics(dev, U, V0);
@@ -496,6 +532,12 @@ int main(int argc, char** argv) {
     }
   }
   CUDA_CHECK(cudaDeviceSynchronize());
+  if (!dumppath.empty()) {
+    std::vector<cplx> fout((size_t)lat.N * D);
+    CUDA_CHECK(cudaMemcpy(fout.data(), dev.f, sizeof(cplx) * lat.N * D, cudaMemcpyDeviceToHost));
+    write_field(dumppath, fout, L, D);
+    printf("dumped final state -> %s\n", dumppath.c_str());
+  }
   dev.free_all();
   return 0;
 }

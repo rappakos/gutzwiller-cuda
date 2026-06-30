@@ -32,6 +32,7 @@ local tridiagonal-in-`m` operator plus a nearest-neighbour gather for `Phi`.
 src/tdgw.cu                     GPU solver (kernels + integrator + diagnostics + selftest)
 reference/tdgw_reference.py     trusted CPU oracle (NumPy/SciPy, small lattices)
 reference/ground_state.py       self-consistent GA ground state (compressed Mott + seed)
+reference/fieldio.py            shared binary field format (Python <-> CUDA --load/--dump)
 tests/host_split_step_check.cpp host-only conservation/order check (g++, no CUDA)
 tests/stiff_regime_check.cpp    host-only split-step vs RK4 in the stiff U/J regime (g++)
 tests/split_step_prototype.cpp  host-only split-step numerics (predictor-corrector)
@@ -169,6 +170,14 @@ cmake --build build --config Release
 
 Python reference (inside a venv): `python reference\tdgw_reference.py`.
 
+Physical run — compressed-Mott initial state → quench → TOF (`U_f<0, V0_f<0` = protocol a):
+
+```
+python reference\ground_state.py --L 160 --V0 6e-4 --dump init.bin    # Mott core + SF shell
+.\build\Release\tdgw.exe --load init.bin --U <U_f> --V0 <V0_f> --steps 20000 --dt 0.002 --dump final.bin
+python analysis\tof.py --in final.bin --out tof.png                    # four-peak TOF
+```
+
 Linux/macOS: `cmake --build build -j`, then `./build/tdgw --selftest`; the host-only
 tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
 
@@ -178,10 +187,12 @@ kernel and timeline profiling.
 ## Roadmap
 
 1. ~~Exact-diagonal split-step integrator~~ — **done** (`--integrator splitstep`, default; midpoint-Φ predictor-corrector).
-2. Compressed-Mott initial state — Python solver done (`reference/ground_state.py`, verified
-   stationary); next add a host `compressed_mott(+seed)` initializer to `tdgw.cu` (atomic-limit
-   Fock |n_j> per site + small seed; no GPU eigensolver needed at deep-Mott params).
-3. `--dump` the `<b_j>` field → observables `N_0(t)`, `C(t)`, TOF via `analysis/tof.py`; reproduce protocol (a).
+2. ~~Compressed-Mott initial state + field I/O~~ — **done**: `reference/ground_state.py`
+   builds it (verified stationary, with the SF shell); `fieldio.py` + `tdgw --load`/`--dump`
+   move the field to/from the GPU (format interop-tested Python↔C++).
+3. Run protocol (a) end-to-end on the GPU (build → `tdgw --load --dump` quench → `tof.py`)
+   and verify `C(t)<0` and the four BZ-corner peaks. Remaining: map Table-I params to U/V0,
+   and log `N_0(t)`/`C(t)` in `tdgw` diagnostics (k_diag already has psi).
 4. Triangular lattice — add `make_triangular()` (z=6, `J1=J3>J2`); kernels unchanged.
 5. 3D cubic 192³ — add `make_cubic()`, low-storage buffers. (Bipartite: no frustration.)
 
