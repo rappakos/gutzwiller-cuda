@@ -139,7 +139,12 @@ state a compressed Mott insulator (n=1 core + thin superfluid shell) from a
 self-consistent Gutzwiller solve, `J/U ≈ 0.0023`, `mu0/U ≈ 0.15` at t₀ = 20 ms. A perfect
 deep-Mott state has ⟨b_j⟩ = 0 — a dynamical fixed point — so a small seed (the thin SF
 shell) is needed to nucleate post-quench coherence (verified in `reference/ground_state.py`:
-unseeded stays frozen, seeded develops N₀).
+unseeded stays frozen, seeded develops N₀). It must also be **low-entropy**: the conserved
+energy E_f = ⟨ψ_init|H_f|ψ_init⟩ must sit near the top of the bounded-above reversed spectrum
+for a condensate to form (effective T<0, *cold*). The compressed Mott's low kinetic energy
+ensures this; the seed must stay small so it doesn't heat the final state (verified: small
+seed → macroscopic (π,π) condensate; large seed → incoherent). Protocol-(a) values that give
+the signature (J_f=1 units): U_f ≈ −2.2 (paper's U/J(30.5 ms)≈−2.19), V0_f ≈ −8e-4.
 Observables: `N_tot`, cloud radius `R(t)`, condensate `N_0(t) = Σ|<b_j>|²`, coherence
 `C(t) = Σ_<ij> <b_i>*<b_j>`, and `I_TOF(k) ∝ |w(k)|² (N_tot − N_0 + |b(k)|²)`,
 `b(k) = Σ e^{−ik·r_j} <b_j>`.
@@ -173,8 +178,8 @@ Python reference (inside a venv): `python reference\tdgw_reference.py`.
 Physical run — compressed-Mott initial state → quench → TOF (`U_f<0, V0_f<0` = protocol a):
 
 ```
-python reference\ground_state.py --L 160 --V0 6e-4 --dump init.bin    # Mott core + SF shell
-.\build\Release\tdgw.exe --load init.bin --U <U_f> --V0 <V0_f> --steps 20000 --dt 0.002 --dump final.bin
+python reference\ground_state.py --L 128 --V0 2.4e-4 --dump init.bin --no-check   # Mott core + SF shell
+.\build\Release\tdgw.exe --load init.bin --U -2.2 --V0 -8e-4 --steps 20000 --dt 0.002 --dump final.bin
 python analysis\tof.py --in final.bin --out tof.png                    # four-peak TOF
 ```
 
@@ -190,9 +195,9 @@ kernel and timeline profiling.
 2. ~~Compressed-Mott initial state + field I/O~~ — **done**: `reference/ground_state.py`
    builds it (verified stationary, with the SF shell); `fieldio.py` + `tdgw --load`/`--dump`
    move the field to/from the GPU (format interop-tested Python↔C++).
-3. Run protocol (a) end-to-end on the GPU (build → `tdgw --load --dump` quench → `tof.py`)
-   and verify `C(t)<0` and the four BZ-corner peaks. Remaining: map Table-I params to U/V0,
-   and log `N_0(t)`/`C(t)` in `tdgw` diagnostics (k_diag already has psi).
+3. Run protocol (a) end-to-end on the GPU (build → `tdgw --load --dump` quench → `tof.py`).
+   `tdgw` now logs `N0/N` and `K` (K>0 = inverse population); params `--U -2.2 --V0 -8e-4`.
+   Remaining: confirm the four BZ-corner peaks; optionally add the intermediate ramp (−138→−2.19).
 4. Triangular lattice — add `make_triangular()` (z=6, `J1=J3>J2`); kernels unchanged.
 5. 3D cubic 192³ — add `make_cubic()`, low-storage buffers. (Bipartite: no frustration.)
 

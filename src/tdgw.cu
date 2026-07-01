@@ -303,7 +303,9 @@ void step(Device& d, const std::string& integ, real U, real V0, real mu0, real d
 // Named functor: an extended __device__ lambda cannot have its return type
 // queried from host code, which thrust::transform_reduce requires -> use a functor.
 struct AbsDevOne { __host__ __device__ float operator()(float x) const { return fabsf(x - 1.0f); } };
-struct Diag { double N, E, max_norm_dev; };
+struct NormC   { __host__ __device__ double operator()(const cplx& z) const { return (double)thrust::norm(z); } };
+// N0 = condensate occupation Sum|<b_j>|^2; Ebond = <H_hop> (sign: >0 = inverse population / T<0).
+struct Diag { double N, E, max_norm_dev, N0, Ebond; };
 Diag diagnostics(Device& d, real U, real V0) {
   int gN = (d.N + TPB - 1) / TPB;
   k_psi <<<gN, TPB>>>(d.f, d.psi, d.N, d.D);
@@ -317,7 +319,9 @@ Diag diagnostics(Device& d, real U, real V0) {
   double Ebnd = thrust::reduce(ebond, ebond + d.N, 0.0);
   float  mdev = thrust::transform_reduce(
       nrm, nrm + d.N, AbsDevOne(), 0.0f, thrust::maximum<real>());
-  return {Ntot, Eloc + Ebnd, (double)mdev};
+  thrust::device_ptr<cplx> psip(d.psi);
+  double N0 = thrust::transform_reduce(psip, psip + d.N, NormC(), 0.0, thrust::plus<double>());
+  return {Ntot, Eloc + Ebnd, (double)mdev, N0, Ebnd};
 }
 
 // ---------------------------------------------------------------------------
@@ -522,13 +526,14 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(dev.f, f0.data(), sizeof(cplx) * lat.N * D, cudaMemcpyHostToDevice));
 
   Diag d0 = diagnostics(dev, U, V0);
-  printf("step %6d   N=%.6f   E=%.6f   |norm-1|=%.2e\n", 0, d0.N, d0.E, d0.max_norm_dev);
+  printf("step %6d   N=%.3f  E=%.3f  N0/N=%.4f  K=%+.3f  |norm-1|=%.1e\n",
+         0, d0.N, d0.E, d0.N0 / d0.N, d0.Ebond, d0.max_norm_dev);
   for (int s = 1; s <= steps; ++s) {
     step(dev, integ, U, V0, mu0, dt);
     if (s % diag_every == 0) {
       Diag d = diagnostics(dev, U, V0);
-      printf("step %6d   N=%.6f   E=%.6f   |norm-1|=%.2e   dN=%.2e\n",
-             s, d.N, d.E, d.max_norm_dev, std::abs(d.N - d0.N));
+      printf("step %6d   N=%.3f  E=%.3f  N0/N=%.4f  K=%+.3f  |norm-1|=%.1e  dN=%.1e\n",
+             s, d.N, d.E, d.N0 / d.N, d.Ebond, d.max_norm_dev, std::abs(d.N - d0.N));
     }
   }
   CUDA_CHECK(cudaDeviceSynchronize());
