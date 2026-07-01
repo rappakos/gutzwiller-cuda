@@ -89,6 +89,18 @@ def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=1, normalize=Tru
     return k, k, I
 
 
+def visibility(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=2, win=0.18):
+    """TOF visibility V=(I_A-I_B)/(I_A+I_B), Rapp PRA 87 Eq. below (12):
+    I_A integrated around the BZ corner Q=(k_L,k_L), I_B around (sqrt2 k_L, 0).
+    V>0 => corner (negative-T, (pi,pi)) weight dominates."""
+    kx, ky, I = tof_intensity(psi, Ntot, N0, lattice_depth, reps, pad, normalize=False)
+    KX, KY = np.meshgrid(kx, ky)
+    def wsum(cx, cy):
+        return float(I[((KX - cx) ** 2 + (KY - cy) ** 2) <= win * win].sum())
+    IA = wsum(1.0, 1.0); IB = wsum(np.sqrt(2.0), 0.0)
+    return (IA - IB) / (IA + IB) if (IA + IB) > 0 else 0.0
+
+
 # --------------------------------------------------------------------------
 def plot_tof(kx, ky, I, out, title=""):
     import matplotlib
@@ -131,6 +143,8 @@ if __name__ == "__main__":
         title = f"TOF  (N0/Ntot = {N0/Ntot:.2f})"
 
     kx, ky, I = tof_intensity(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
+    V = visibility(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
     print(f"L={psi.shape[0]}  N_tot={Ntot:.1f}  N0={N0:.1f}  "
-          f"condensate fraction={N0/Ntot:.2f}")
+          f"condensate fraction={N0/Ntot:.2f}  visibility V={V:+.3f}")
+    title += f"   V={V:+.2f}"
     plot_tof(kx, ky, I, args.out, title)

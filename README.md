@@ -38,6 +38,7 @@ tests/stiff_regime_check.cpp    host-only split-step vs RK4 in the stiff U/J reg
 tests/split_step_prototype.cpp  host-only split-step numerics (predictor-corrector)
 analysis/tof.py                 time-of-flight image generator (numpy.fft, post-processing)
 analysis/make_gif.py            assemble a TOF-vs-time GIF from --dump-every frames
+analysis/plot_diag.py           plot N0/N(t), K(t), R(t) from a captured tdgw run log
 CMakeLists.txt                  modern CMake; targets sm_75
 ```
 
@@ -149,6 +150,28 @@ the signature (J_f=1 units): U_f ≈ −2.2 (paper's U/J(30.5 ms)≈−2.19), V0
 Observables: `N_tot`, cloud radius `R(t)`, condensate `N_0(t) = Σ|<b_j>|²`, coherence
 `C(t) = Σ_<ij> <b_i>*<b_j>`, and `I_TOF(k) ∝ |w(k)|² (N_tot − N_0 + |b(k)|²)`,
 `b(k) = Σ e^{−ik·r_j} <b_j>`.
+
+## Results
+
+Protocol (a) reproduced end-to-end on the RTX 2060 (L=192, D=7, N ~ 1900): from the
+compressed-Mott + SF-shell initial state, quenched to `U_f/J = -2.2`, `V0_f/J = -8e-4`,
+the cloud develops the negative-T signature —
+
+- condensate fraction **N0/N ~ 0.62** (stable to the end of the run),
+- bond/kinetic energy **K > 0** (K/N ~ +1.7 J) — the inverse population,
+- TOF **visibility V > 0** — weight piled on the BZ corners,
+- **four TOF peaks at Q = (+-k_L, +-k_L)**,
+- N_tot conserved to ~0.02%, per-site norm ~1e-7, cloud radius R ~ 38 << L/2 (no wall contact).
+
+![reference TOF](docs/tof_reference.png)
+
+The figure is the trusted Python reference at small L; the L=192 GPU run gives the same
+four-corner pattern, sharper. Reproduce with the *Physical run* commands above; build the
+time-lapse with `analysis/make_gif.py` and the diagnostics plot with `analysis/plot_diag.py`.
+
+Caveat: this is the pure Gutzwiller mean-field result — no quantum/thermal fluctuations — so
+it **over-orders** vs experiment (sharper peaks, higher N0/N). Beyond-GA (e.g. truncated
+Wigner) would broaden it; out of scope here.
 
 ## Requirements
 

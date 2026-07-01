@@ -36,11 +36,12 @@ def main():
         psi, Ntot, N0 = tof.load_field(f)
         kx, ky, I = tof.tof_intensity(psi, Ntot, N0, args.lattice_depth,
                                       args.reps, args.pad, normalize=False)
-        Is.append(I); meta.append((kx, ky, N0 / Ntot, os.path.basename(f)))
+        V = tof.visibility(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
+        Is.append(I); meta.append((kx, ky, N0 / Ntot, V, os.path.basename(f)))
     gmax = max(float(I.max()) for I in Is) or 1.0
 
     frames = []
-    for I, (kx, ky, frac, name) in zip(Is, meta):
+    for I, (kx, ky, frac, V, name) in zip(Is, meta):
         fig, ax = plt.subplots(figsize=(4.6, 4.2))
         ax.imshow(I / gmax, origin="lower", extent=[kx[0], kx[-1], ky[0], ky[-1]],
                   cmap="inferno", vmin=0, vmax=1, interpolation="bilinear")
@@ -48,7 +49,7 @@ def main():
             for sy in (-1, 1):
                 ax.plot(sx, sy, "o", mfc="none", mec="cyan", ms=10, mew=1.0)
         ax.set_xlabel(r"$k_x/k_L$"); ax.set_ylabel(r"$k_y/k_L$")
-        ax.set_title(f"{name}   N0/N = {frac:.2f}")
+        ax.set_title(f"{name}   N0/N={frac:.2f}  V={V:+.2f}")
         fig.tight_layout(); fig.canvas.draw()
         w, h = fig.canvas.get_width_height()
         buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(h, w, 4)[..., :3].copy()

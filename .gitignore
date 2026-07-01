@@ -30,3 +30,8 @@ __pycache__/
 *.png
 *.gif
 results/
+
+# ...but keep curated figures in docs/
+!docs/
+!docs/*.png
+!docs/*.gif
