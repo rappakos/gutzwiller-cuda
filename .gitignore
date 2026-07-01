@@ -24,3 +24,7 @@ __pycache__/
 # Archives / source papers (kept out of version control)
 *.zip
 *.pdf
+
+# Generated run artifacts (regenerable): field dumps + figures
+*.bin
+*.png
