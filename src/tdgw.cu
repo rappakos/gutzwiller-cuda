@@ -50,6 +50,7 @@
 #include <thrust/reduce.h>
 #include <thrust/transform_reduce.h>
 #include <thrust/functional.h>
+#include <thrust/inner_product.h>
 
 using real = float;
 using cplx = thrust::complex<float>;
@@ -305,7 +306,7 @@ void step(Device& d, const std::string& integ, real U, real V0, real mu0, real d
 struct AbsDevOne { __host__ __device__ float operator()(float x) const { return fabsf(x - 1.0f); } };
 struct NormC   { __host__ __device__ double operator()(const cplx& z) const { return (double)thrust::norm(z); } };
 // N0 = condensate occupation Sum|<b_j>|^2; Ebond = <H_hop> (sign: >0 = inverse population / T<0).
-struct Diag { double N, E, max_norm_dev, N0, Ebond; };
+struct Diag { double N, E, max_norm_dev, N0, Ebond, R; };  // R = rms cloud radius (sites)
 Diag diagnostics(Device& d, real U, real V0) {
   int gN = (d.N + TPB - 1) / TPB;
   k_psi <<<gN, TPB>>>(d.f, d.psi, d.N, d.D);
@@ -321,7 +322,10 @@ Diag diagnostics(Device& d, real U, real V0) {
       nrm, nrm + d.N, AbsDevOne(), 0.0f, thrust::maximum<real>());
   thrust::device_ptr<cplx> psip(d.psi);
   double N0 = thrust::transform_reduce(psip, psip + d.N, NormC(), 0.0, thrust::plus<double>());
-  return {Ntot, Eloc + Ebnd, (double)mdev, N0, Ebnd};
+  thrust::device_ptr<real> r2p(d.r2);
+  double Rsum = thrust::inner_product(n, n + d.N, r2p, 0.0);   // Sum n_j r_j^2
+  double R = (Ntot > 0.0) ? sqrt(Rsum / Ntot) : 0.0;
+  return {Ntot, Eloc + Ebnd, (double)mdev, N0, Ebnd, R};
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +490,8 @@ int main(int argc, char** argv) {
   real dt = 2e-3f, U = -0.5f, V0 = -2.5e-3f, mu0 = 0.f, Jx = 1.f, Jy = 1.f;
   bool selftest = false;
   std::string integ = "splitstep";
-  std::string loadpath, dumppath;
+  std::string loadpath, dumppath, dumpPrefix = "frame";
+  int dumpEvery = 0;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto nf = [&](real& v) { v = atof(argv[++i]); };
@@ -500,6 +505,8 @@ int main(int argc, char** argv) {
     else if (a == "--integrator") integ = argv[++i];
     else if (a == "--load") loadpath = argv[++i];
     else if (a == "--dump") dumppath = argv[++i];
+    else if (a == "--dump-every") dumpEvery = atoi(argv[++i]);
+    else if (a == "--dump-prefix") dumpPrefix = argv[++i];
   }
   if (D > DMAX) { fprintf(stderr, "D > DMAX (%d)\n", DMAX); return 1; }
   if (integ != "splitstep" && integ != "rk4") {
@@ -526,15 +533,23 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(dev.f, f0.data(), sizeof(cplx) * lat.N * D, cudaMemcpyHostToDevice));
 
   Diag d0 = diagnostics(dev, U, V0);
-  printf("step %6d   N=%.3f  E=%.3f  N0/N=%.4f  K=%+.3f  |norm-1|=%.1e\n",
-         0, d0.N, d0.E, d0.N0 / d0.N, d0.Ebond, d0.max_norm_dev);
+  printf("step %6d   N=%.2f  N0/N=%.4f  K=%+.3f  R=%.1f  |norm-1|=%.1e\n",
+         0, d0.N, d0.N0 / d0.N, d0.Ebond, d0.R, d0.max_norm_dev);
+  auto dump_frame = [&](int step_) {
+    std::vector<cplx> fo((size_t)lat.N * D);
+    CUDA_CHECK(cudaMemcpy(fo.data(), dev.f, sizeof(cplx) * lat.N * D, cudaMemcpyDeviceToHost));
+    char fn[512]; snprintf(fn, sizeof fn, "%s_%05d.bin", dumpPrefix.c_str(), step_);
+    write_field(fn, fo, L, D);
+  };
+  if (dumpEvery > 0) dump_frame(0);
   for (int s = 1; s <= steps; ++s) {
     step(dev, integ, U, V0, mu0, dt);
     if (s % diag_every == 0) {
       Diag d = diagnostics(dev, U, V0);
-      printf("step %6d   N=%.3f  E=%.3f  N0/N=%.4f  K=%+.3f  |norm-1|=%.1e  dN=%.1e\n",
-             s, d.N, d.E, d.N0 / d.N, d.Ebond, d.max_norm_dev, std::abs(d.N - d0.N));
+      printf("step %6d   N=%.2f  N0/N=%.4f  K=%+.3f  R=%.1f  |norm-1|=%.1e  dN=%.1e\n",
+             s, d.N, d.N0 / d.N, d.Ebond, d.R, d.max_norm_dev, std::abs(d.N - d0.N));
     }
+    if (dumpEvery > 0 && s % dumpEvery == 0) dump_frame(s);
   }
   CUDA_CHECK(cudaDeviceSynchronize());
   if (!dumppath.empty()) {

@@ -57,7 +57,7 @@ def synth_field(L=128, sigma_frac=0.18, n_center=1.0, condensate_frac=0.7):
 
 
 # --------------------------------------------------------------------------
-def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=1):
+def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=1, normalize=True):
     """Return (kx, ky, I) with momenta in units of k_L.
 
     The lattice DFT is periodic over the reciprocal lattice, so we tile the
@@ -84,7 +84,8 @@ def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=1):
     KX, KY = np.meshgrid(k, k)
     W = np.exp(-(KX ** 2 + KY ** 2) / np.sqrt(lattice_depth))   # |w(k)|^2 envelope
     I = W * G_tiled
-    I /= I.max()
+    if normalize:
+        I /= I.max()
     return k, k, I
 
 
@@ -104,6 +105,7 @@ def plot_tof(kx, ky, I, out, title=""):
     ax.set_xlabel(r"$k_x / k_L$"); ax.set_ylabel(r"$k_y / k_L$")
     ax.set_title(title or "TOF intensity  $I(k)$")
     fig.colorbar(im, ax=ax, label="normalized intensity")
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     fig.tight_layout(); fig.savefig(out, dpi=130)
     print("wrote", out)
 
@@ -114,7 +116,7 @@ if __name__ == "__main__":
     ap.add_argument("--in", dest="infile", help="field dump from tdgw --dump")
     ap.add_argument("--demo", action="store_true",
                     help="use a synthetic protocol-(a) checkerboard field")
-    ap.add_argument("--out", default="tof.png")
+    ap.add_argument("--out", default="results/tof.png")
     ap.add_argument("--lattice-depth", type=float, default=6.0,
                     help="final lattice depth s (sets Wannier envelope width)")
     ap.add_argument("--reps", type=int, default=2, help="BZ tiling for display")

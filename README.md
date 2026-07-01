@@ -37,6 +37,7 @@ tests/host_split_step_check.cpp host-only conservation/order check (g++, no CUDA
 tests/stiff_regime_check.cpp    host-only split-step vs RK4 in the stiff U/J regime (g++)
 tests/split_step_prototype.cpp  host-only split-step numerics (predictor-corrector)
 analysis/tof.py                 time-of-flight image generator (numpy.fft, post-processing)
+analysis/make_gif.py            assemble a TOF-vs-time GIF from --dump-every frames
 CMakeLists.txt                  modern CMake; targets sm_75
 ```
 
@@ -180,7 +181,15 @@ Physical run — compressed-Mott initial state → quench → TOF (`U_f<0, V0_f<
 ```
 python reference\ground_state.py --L 128 --V0 2.4e-4 --dump init.bin --no-check   # Mott core + SF shell
 .\build\Release\tdgw.exe --load init.bin --U -2.2 --V0 -8e-4 --steps 20000 --dt 0.002 --dump final.bin
-python analysis\tof.py --in final.bin --out tof.png                    # four-peak TOF
+python analysis\tof.py --in final.bin --out results\tof.png            # four-peak TOF
+```
+
+Time series → GIF (watch N0/N, K, R evolve and the peaks form):
+
+```
+mkdir results
+.\build\Release\tdgw.exe --load init.bin --U -2.2 --V0 -8e-4 --steps 20000 --dt 0.002 --dump-every 500 --dump-prefix results\frame
+python analysis\make_gif.py "results\frame_*.bin" --out results\tof.gif --fps 10
 ```
 
 Linux/macOS: `cmake --build build -j`, then `./build/tdgw --selftest`; the host-only

@@ -28,3 +28,5 @@ __pycache__/
 # Generated run artifacts (regenerable): field dumps + figures
 *.bin
 *.png
+*.gif
+results/
