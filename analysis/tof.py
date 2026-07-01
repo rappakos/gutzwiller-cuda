@@ -57,7 +57,7 @@ def synth_field(L=128, sigma_frac=0.18, n_center=1.0, condensate_frac=0.7):
 
 
 # --------------------------------------------------------------------------
-def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3):
+def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=1):
     """Return (kx, ky, I) with momenta in units of k_L.
 
     The lattice DFT is periodic over the reciprocal lattice, so we tile the
@@ -67,6 +67,10 @@ def tof_intensity(psi, Ntot, N0, lattice_depth=6.0, reps=3):
     Nyquist (checkerboard) component stays pinned to k=+-1.
     """
     L = psi.shape[0]
+    if pad > 1:                                          # zero-pad the (localized) cloud ->
+        Lp = pad * L; o = (Lp - L) // 2                  # finer k-grid = true finite-cloud peak shape
+        pp = np.zeros((Lp, Lp), dtype=complex); pp[o:o+L, o:o+L] = psi
+        psi = pp; L = Lp
     b = np.fft.fftshift(np.fft.fft2(psi))                # b(k), first BZ
     G = (Ntot - N0) + np.abs(b) ** 2                     # incoherent bg + |b|^2
 
@@ -114,6 +118,7 @@ if __name__ == "__main__":
     ap.add_argument("--lattice-depth", type=float, default=6.0,
                     help="final lattice depth s (sets Wannier envelope width)")
     ap.add_argument("--reps", type=int, default=2, help="BZ tiling for display")
+    ap.add_argument("--pad", type=int, default=2, help="zero-pad factor (smooth finite-cloud peaks)")
     args = ap.parse_args()
 
     if args.demo or not args.infile:
@@ -123,7 +128,7 @@ if __name__ == "__main__":
         psi, Ntot, N0 = load_field(args.infile)
         title = f"TOF  (N0/Ntot = {N0/Ntot:.2f})"
 
-    kx, ky, I = tof_intensity(psi, Ntot, N0, args.lattice_depth, args.reps)
+    kx, ky, I = tof_intensity(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
     print(f"L={psi.shape[0]}  N_tot={Ntot:.1f}  N0={N0:.1f}  "
           f"condensate fraction={N0/Ntot:.2f}")
     plot_tof(kx, ky, I, args.out, title)
