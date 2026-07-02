@@ -101,6 +101,112 @@ def visibility(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=2, win=0.18):
     return (IA - IB) / (IA + IB) if (IA + IB) > 0 else 0.0
 
 
+# ==========================================================================
+# Triangular lattice: hexagonal reciprocal lattice.
+# --------------------------------------------------------------------------
+# A plain fft2 of psi[y,x] samples b(k) on the OBLIQUE reciprocal grid
+#   k = (m_x/L) B1 + (m_y/L) B2 ,   a_i . B_j = 2*pi*delta_ij ,
+# for lattice vectors a1=(1,0), a2=(-1/2, sqrt3/2) (matches make_triangular).
+# We map those samples to physical (kx,ky), tile over neighbouring BZs, apply
+# the Wannier envelope, and interpolate onto a regular grid for display. The
+# condensate peaks sit at the single-particle band MAXIMA (K-points), whose
+# location MOVES with the hopping anisotropy J1:J2:J3 -- the frustration signal
+# of Rapp, PRA 90, 053607 (2014). Momenta are reported in units of k_L = pi/a.
+# ==========================================================================
+_A1 = np.array([1.0, 0.0]); _A2 = np.array([-0.5, np.sqrt(3.0) / 2.0]); _A3 = _A1 + _A2
+_B1 = 2 * np.pi * np.array([1.0, 1.0 / np.sqrt(3.0)])
+_B2 = 2 * np.pi * np.array([0.0, 2.0 / np.sqrt(3.0)])
+
+
+def band_max_k(J1, J2, J3, ngrid=361, span=1.7, tol=3e-3, min_sep=0.7):
+    """Distinct momenta of the band maxima eps_k = -2 sum_j J_j cos(k.a_j)
+    within (a little beyond) the first Brillouin zone -- the frustrated
+    K-points -- returned in units of k_L = pi."""
+    g = np.linspace(-span, span, ngrid) * np.pi; KX, KY = np.meshgrid(g, g)
+    E = -2 * (J1 * np.cos(KX * _A1[0] + KY * _A1[1])
+              + J2 * np.cos(KX * _A2[0] + KY * _A2[1])
+              + J3 * np.cos(KX * _A3[0] + KY * _A3[1]))
+    Emax = E.max(); m = E > Emax - tol * abs(Emax)
+    cand = np.column_stack([KX[m], KY[m]]) / np.pi
+    peaks = []
+    for p in cand:
+        if all(np.hypot(*(p - q)) > min_sep for q in peaks):
+            peaks.append(p)
+    return np.array(peaks), Emax
+
+
+def _tri_scatter(psi, reps):
+    """b(k) samples in physical k (units of k_L=pi): returns (kx,ky,b) flat."""
+    L = psi.shape[0]
+    b = np.fft.fftshift(np.fft.fft2(psi))
+    fx = np.fft.fftshift(np.fft.fftfreq(L)); FX, FY = np.meshgrid(fx, fx)  # FX~m_x, FY~m_y
+    kxs, kys, bs = [], [], []
+    rr = range(-(reps // 2), reps // 2 + 1)
+    for n1 in rr:
+        for n2 in rr:
+            kx = ((FX + n1) * _B1[0] + (FY + n2) * _B2[0]) / np.pi   # k_L units
+            ky = ((FX + n1) * _B1[1] + (FY + n2) * _B2[1]) / np.pi
+            kxs.append(kx.ravel()); kys.append(ky.ravel()); bs.append(b.ravel())
+    return np.concatenate(kxs), np.concatenate(kys), np.concatenate(bs)
+
+
+def tof_intensity_tri(psi, Ntot, N0, lattice_depth=6.0, reps=3, pad=2,
+                      ngrid=420, normalize=True):
+    """(kx,ky,I) for a triangular field on a regular physical k-grid (k_L units)."""
+    from scipy.interpolate import griddata
+    L = psi.shape[0]
+    if pad > 1:
+        Lp = pad * L; o = (Lp - L) // 2
+        pp = np.zeros((Lp, Lp), dtype=complex); pp[o:o+L, o:o+L] = psi
+        psi = pp
+    reps = reps + 1 if reps % 2 == 0 else reps
+    kx, ky, b = _tri_scatter(psi, reps)
+    G = (Ntot - N0) + np.abs(b) ** 2
+    gx = np.linspace(-3.0, 3.0, ngrid); KXg, KYg = np.meshgrid(gx, gx)
+    Gg = griddata(np.column_stack([kx, ky]), G, (KXg, KYg),
+                  method="linear", fill_value=0.0)
+    W = np.exp(-(KXg ** 2 + KYg ** 2) / np.sqrt(lattice_depth))   # k_L units, as square
+    I = W * Gg
+    if normalize and I.max() > 0: I /= I.max()
+    return gx, gx, I
+
+
+def kpoint_coherence(psi, J1, J2, J3, reps=3, win=0.35):
+    """Fraction of coherent weight |b(k)|^2 lying within `win` (k_L) of a band-max
+    K-point. Large => sharp condensate at the frustrated K-point (isotropic/rhombic);
+    small => weight smeared / off the K-points (frustrated, no coherence). At L=24
+    an incoherent Mott gives ~0.01, the negative-T condensate ~0.2 (peaks sharpen
+    with L, so the contrast grows on the GPU-scale lattices)."""
+    peaks, _ = band_max_k(J1, J2, J3)
+    reps = reps + 1 if reps % 2 == 0 else reps
+    kx, ky, b = _tri_scatter(psi, reps)
+    w = np.abs(b) ** 2
+    near = np.zeros(kx.shape, bool)
+    for p in peaks:
+        near |= (kx - p[0]) ** 2 + (ky - p[1]) ** 2 <= win * win
+    tot = w.sum()
+    return float(w[near].sum() / tot) if tot > 0 else 0.0
+
+
+# --------------------------------------------------------------------------
+def plot_tof_tri(kx, ky, I, out, peaks=None, title=""):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5.2, 4.4))
+    im = ax.imshow(I, origin="lower", extent=[kx[0], kx[-1], ky[0], ky[-1]],
+                   cmap="inferno", interpolation="bilinear")
+    if peaks is not None:
+        for p in peaks:
+            ax.plot(p[0], p[1], "o", mfc="none", mec="cyan", ms=12, mew=1.2)
+    ax.set_xlabel(r"$k_x / k_L$"); ax.set_ylabel(r"$k_y / k_L$")
+    ax.set_aspect("equal"); ax.set_title(title or "TOF intensity  $I(k)$  (triangular)")
+    fig.colorbar(im, ax=ax, label="normalized intensity")
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    fig.tight_layout(); fig.savefig(out, dpi=130)
+    print("wrote", out)
+
+
 # --------------------------------------------------------------------------
 def plot_tof(kx, ky, I, out, title=""):
     import matplotlib
@@ -133,6 +239,10 @@ if __name__ == "__main__":
                     help="final lattice depth s (sets Wannier envelope width)")
     ap.add_argument("--reps", type=int, default=2, help="BZ tiling for display")
     ap.add_argument("--pad", type=int, default=2, help="zero-pad factor (smooth finite-cloud peaks)")
+    ap.add_argument("--lattice", choices=["square", "triangular"], default="square")
+    ap.add_argument("--J1", type=float, default=1.0)
+    ap.add_argument("--J2", type=float, default=1.0)
+    ap.add_argument("--J3", type=float, default=1.0)
     args = ap.parse_args()
 
     if args.demo or not args.infile:
@@ -142,9 +252,19 @@ if __name__ == "__main__":
         psi, Ntot, N0 = load_field(args.infile)
         title = f"TOF  (N0/Ntot = {N0/Ntot:.2f})"
 
-    kx, ky, I = tof_intensity(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
-    V = visibility(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
-    print(f"L={psi.shape[0]}  N_tot={Ntot:.1f}  N0={N0:.1f}  "
-          f"condensate fraction={N0/Ntot:.2f}  visibility V={V:+.3f}")
-    title += f"   V={V:+.2f}"
-    plot_tof(kx, ky, I, args.out, title)
+    if args.lattice == "triangular":
+        kx, ky, I = tof_intensity_tri(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
+        peaks, _ = band_max_k(args.J1, args.J2, args.J3)
+        C = kpoint_coherence(psi, args.J1, args.J2, args.J3)
+        print(f"L={psi.shape[0]}  N_tot={Ntot:.1f}  N0={N0:.1f}  "
+              f"condensate fraction={N0/Ntot:.2f}  K-point coherence={C:.3f}  "
+              f"({len(peaks)} band-max K-points)")
+        title += f"   [tri J={args.J1:g}:{args.J2:g}:{args.J3:g}]  C_K={C:.2f}"
+        plot_tof_tri(kx, ky, I, args.out, peaks, title)
+    else:
+        kx, ky, I = tof_intensity(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
+        V = visibility(psi, Ntot, N0, args.lattice_depth, args.reps, args.pad)
+        print(f"L={psi.shape[0]}  N_tot={Ntot:.1f}  N0={N0:.1f}  "
+              f"condensate fraction={N0/Ntot:.2f}  visibility V={V:+.3f}")
+        title += f"   V={V:+.2f}"
+        plot_tof(kx, ky, I, args.out, title)

@@ -61,6 +61,30 @@ def square_lattice(L, Jx=1.0, Jy=1.0):
     return A, r2
 
 
+def triangular_lattice(L, J1=1.0, J2=1.0, J3=1.0):
+    """Triangular lattice (z=6), open boundaries; matches tdgw make_triangular.
+    Directions +-a1 (J1), +-a2 (J2), +-(a1+a2) (J3), with a1=(1,0),
+    a2=(-1/2, sqrt3/2) (unit NN spacing, 120 deg). r^2 is the physical (oblique)
+    distance from the trap centre."""
+    N = L * L
+    A = np.zeros((N, N))
+    def idx(x, y): return x + L * y
+    a1 = np.array([1.0, 0.0]); a2 = np.array([-0.5, np.sqrt(3.0) / 2.0])
+    dirs = [((1, 0), J1), ((-1, 0), J1), ((0, 1), J2),
+            ((0, -1), J2), ((1, 1), J3), ((-1, -1), J3)]
+    r2 = np.zeros(N); c = (L - 1) / 2.0
+    for y in range(L):
+        for x in range(L):
+            j = idx(x, y)
+            Rj = (x - c) * a1 + (y - c) * a2
+            r2[j] = float(Rj @ Rj)
+            for (dx, dy), Jw in dirs:
+                xx, yy = x + dx, y + dy
+                if 0 <= xx < L and 0 <= yy < L:
+                    A[j, idx(xx, yy)] = Jw
+    return A, r2
+
+
 # --------------------------------------------------------------------------
 # Right-hand side and conserved quantities (vectorised over all sites).
 # --------------------------------------------------------------------------

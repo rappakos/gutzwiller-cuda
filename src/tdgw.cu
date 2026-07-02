@@ -98,8 +98,36 @@ Lattice make_square(int L, real Jx, real Jy) {
     }
   return lat;
 }
-// triangular: make_triangular() with Z=6 axial offsets + Jdir {J1,J1,J2,J2,J3,J3}.
-// 3D:         make_cubic()      with Z=6: +-x,+-y,+-z.  Kernels unchanged.
+// Triangular lattice (z=6), open boundaries. Sites live on a sheared grid with
+// lattice vectors a1=(1,0), a2=(-1/2, sqrt3/2) (unit NN spacing, 120 deg); the
+// six neighbours are +-a1 (J1), +-a2 (J2), +-(a1+a2) (J3). r^2 is the *physical*
+// (oblique) distance from the trap centre, so the trap stays isotropic in real
+// space. Kernels/integrator/diagnostics are unchanged -- only the neighbour list
+// and Jdir differ from make_square. Matches reference/tdgw_reference.py
+// triangular_lattice(). PRA 90, 053607 (2014): J1=J3>J2 is the frustration knob.
+Lattice make_triangular(int L, real J1, real J2, real J3) {
+  Lattice lat;
+  lat.L = L; lat.N = L * L; lat.Z = 6;
+  lat.nbr.assign(lat.Z * lat.N, -1);
+  lat.Jdir = {J1, J1, J2, J2, J3, J3};
+  lat.r2.resize(lat.N);
+  const real c = (L - 1) * 0.5f, s3 = 0.86602540378f;   // sqrt(3)/2
+  auto id = [L](int x, int y) { return x + L * y; };
+  auto put = [&](int d, int j, int x, int y) {
+    if (x >= 0 && x < L && y >= 0 && y < L) lat.nbr[d * lat.N + j] = id(x, y);
+  };
+  for (int y = 0; y < L; ++y)
+    for (int x = 0; x < L; ++x) {
+      int j = id(x, y);
+      put(0, j, x + 1, y);   put(1, j, x - 1, y);       // +-a1  (J1)
+      put(2, j, x,     y + 1); put(3, j, x, y - 1);      // +-a2  (J2)
+      put(4, j, x + 1, y + 1); put(5, j, x - 1, y - 1);  // +-(a1+a2) (J3)
+      real Rx = (x - c) - 0.5f * (y - c), Ry = s3 * (y - c);
+      lat.r2[j] = Rx * Rx + Ry * Ry;
+    }
+  return lat;
+}
+// 3D: make_cubic() with Z=6: +-x,+-y,+-z.  Kernels unchanged.
 
 // ---------------------------------------------------------------------------
 //  Kernels.  One thread == one lattice site throughout.
@@ -488,6 +516,8 @@ int run_selftest() {
 int main(int argc, char** argv) {
   int L = 192, D = 12, steps = 2000, diag_every = 200;
   real dt = 2e-3f, U = -0.5f, V0 = -2.5e-3f, mu0 = 0.f, Jx = 1.f, Jy = 1.f;
+  real J1 = 1.f, J2 = 1.f, J3 = 1.f;               // triangular hoppings
+  std::string lattice = "square";                  // square | triangular
   bool selftest = false;
   std::string integ = "splitstep";
   std::string loadpath, dumppath, dumpPrefix = "frame";
@@ -501,6 +531,9 @@ int main(int argc, char** argv) {
     else if (a == "--steps") ni(steps);   else if (a == "--dt") nf(dt);
     else if (a == "--U") nf(U);           else if (a == "--V0") nf(V0);
     else if (a == "--Jx") nf(Jx);         else if (a == "--Jy") nf(Jy);
+    else if (a == "--lattice") lattice = argv[++i];
+    else if (a == "--J1") nf(J1);         else if (a == "--J2") nf(J2);
+    else if (a == "--J3") nf(J3);
     else if (a == "--diag") ni(diag_every);
     else if (a == "--integrator") integ = argv[++i];
     else if (a == "--load") loadpath = argv[++i];
@@ -512,6 +545,9 @@ int main(int argc, char** argv) {
   if (integ != "splitstep" && integ != "rk4") {
     fprintf(stderr, "--integrator must be splitstep or rk4\n"); return 1;
   }
+  if (lattice != "square" && lattice != "triangular") {
+    fprintf(stderr, "--lattice must be square or triangular\n"); return 1;
+  }
   if (selftest) return run_selftest();
 
   std::vector<cplx> f0;
@@ -522,9 +558,14 @@ int main(int argc, char** argv) {
     if (D > DMAX) { fprintf(stderr, "loaded D > DMAX (%d)\n", DMAX); return 1; }
   }
 
-  Lattice lat = make_square(L, Jx, Jy);
-  printf("square %dx%d  N=%d  D=%d  Jx=%g Jy=%g  U=%g V0=%g  dt=%g  steps=%d\n",
-         L, L, lat.N, D, Jx, Jy, U, V0, dt, steps);
+  Lattice lat = (lattice == "triangular") ? make_triangular(L, J1, J2, J3)
+                                          : make_square(L, Jx, Jy);
+  if (lattice == "triangular")
+    printf("triangular %dx%d  N=%d  D=%d  J1=%g J2=%g J3=%g  U=%g V0=%g  dt=%g  steps=%d\n",
+           L, L, lat.N, D, J1, J2, J3, U, V0, dt, steps);
+  else
+    printf("square %dx%d  N=%d  D=%d  Jx=%g Jy=%g  U=%g V0=%g  dt=%g  steps=%d\n",
+           L, L, lat.N, D, Jx, Jy, U, V0, dt, steps);
   printf("integrator: %s   state buffer: %.1f MB each (RK4 holds 6; split-step ~2)\n",
          integ.c_str(), sizeof(cplx) * (double)lat.N * D / 1e6);
 

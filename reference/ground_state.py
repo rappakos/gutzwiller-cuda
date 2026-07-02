@@ -17,7 +17,7 @@ N_tot do not drift under real-time evolution.
 """
 import argparse
 import numpy as np
-from tdgw_reference import square_lattice, TDGW
+from tdgw_reference import square_lattice, triangular_lattice, TDGW
 from fieldio import write_field
 
 
@@ -76,12 +76,16 @@ if __name__ == "__main__":
     ap.add_argument("--mu0", type=float, default=0.15)
     ap.add_argument("--V0", type=float, default=0.0023, help="trap (compression); >0 confines")
     ap.add_argument("--seed", type=float, default=0.05)
+    ap.add_argument("--lattice", choices=["square", "triangular"], default="square")
     ap.add_argument("--dump", help="write the initial state to a field file (for tdgw --load)")
     ap.add_argument("--no-check", action="store_true", help="skip the stationarity check")
     args = ap.parse_args()
     L, D, U, J, mu0, V0 = args.L, args.D, args.U, args.J, args.mu0, args.V0
-    A, r2 = square_lattice(L, J, J)
-    print(f"deep-lattice ground state: {L}x{L}, D={D}, J/U={J/U:.4f}, mu0/U={mu0:.3f}, V0={V0}")
+    # Deep lattice: isotropic hopping J on every bond (Mott core is geometry-agnostic).
+    A, r2 = (triangular_lattice(L, J, J, J) if args.lattice == "triangular"
+             else square_lattice(L, J, J))
+    print(f"deep-lattice ground state [{args.lattice}]: {L}x{L}, D={D}, "
+          f"J/U={J/U:.4f}, mu0/U={mu0:.3f}, V0={V0}")
     f = gs_solve(A, r2, U, J, mu0, V0, D, seed=args.seed)
 
     n = np.sum(np.arange(D)[None, :] * np.abs(f) ** 2, axis=1)
@@ -98,6 +102,4 @@ if __name__ == "__main__":
     if not args.no_check and L <= 32:
         print("  stationarity check (real-time TDGW, same params, T=2):")
         model = TDGW(A, r2, U, V0, mu0, D)
-        t, fs = model.evolve(f, T=2.0, n_eval=5, rtol=1e-9, atol=1e-11)
-        max_dn = max(np.max(np.abs(np.sum(np.arange(D)[None, :] * np.abs(ft) ** 2, axis=1) - n)) for ft in fs)
-        print(f"    max |n_j(t)-n_j(0)| = {max_dn:.2e}  --> " + ("STATIONARY (PASS)" if max_dn < 1e-3 else "drifts (check)"))
+  

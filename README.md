@@ -1,4 +1,4 @@
-# Time-dependent Gutzwiller on the GPU — square-lattice solver
+# Time-dependent Gutzwiller on the GPU — square & triangular lattice solver
 
 A modern C++/CUDA revival of the time-dependent Gutzwiller (TDGW) mean-field
 dynamics of the Bose–Hubbard model. Personal research project. Sized for a
@@ -7,7 +7,7 @@ dynamics of the Bose–Hubbard model. Personal research project. Sized for a
 Physics follows two papers by Á. Rapp:
 
 - **square lattice / negative-T** (the current target) — Phys. Rev. A **87**, 043611 (2013) [arXiv:1211.4350]
-- **triangular / kinetic frustration** (later goal) — Phys. Rev. A **90**, 053607 (2014)
+- **triangular / kinetic frustration** (now implemented, `--lattice triangular`) — Phys. Rev. A **90**, 053607 (2014)
 
 This is a **kernel-architecture sketch with a validation scaffold baked in**, not
 a finished code. The physics is checked against a tight-tolerance Python reference
@@ -215,6 +215,23 @@ mkdir results
 python analysis\make_gif.py "results\frame_*.bin" --out results\tof.gif --fps 10
 ```
 
+Triangular lattice — kinetic frustration (Rapp 2013/14). Same binary; add `--lattice
+triangular` (z=6, hoppings `--J1 --J2 --J3`; isotropic default 1:1:1). `ground_state.py`
+and `tof.py` take the same flag:
+
+```
+python reference\ground_state.py --lattice triangular --L 128 --V0 2.4e-4 --dump init_tri.bin --no-check
+.\build\Release\tdgw.exe --lattice triangular --J1 1 --J2 1 --J3 1 --load init_tri.bin --U -2.2 --V0 -8e-4 --steps 20000 --dt 0.002 --dump final_tri.bin
+python analysis\tof.py --lattice triangular --J1 1 --J2 1 --J3 1 --in final_tri.bin --out results\tof_tri.png
+```
+
+The negative-T condensate forms at the single-particle band **maxima** (the K-points),
+which for the isotropic lattice are the six corners of the hexagonal BZ at |k|≈1.33 k_L
+— the 120° three-sublattice order. `tof.py` locates those maxima from the dispersion
+(`band_max_k`) and reports a K-point coherence `C_K`; because the maxima **move** with
+the anisotropy J1:J2:J3, sweeping J2 down from 1 toward the rhombic limit is the
+frustration study (`eps_max` climbs 3.0 → 4.0). Reference figure: `docs/tof_triangular_reference.png`.
+
 Linux/macOS: `cmake --build build -j`, then `./build/tdgw --selftest`; the host-only
 tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
 
@@ -225,28 +242,4 @@ kernel and timeline profiling.
 
 1. ~~Exact-diagonal split-step integrator~~ — **done** (`--integrator splitstep`, default; midpoint-Φ predictor-corrector).
 2. ~~Compressed-Mott initial state + field I/O~~ — **done**: `reference/ground_state.py`
-   builds it (verified stationary, with the SF shell); `fieldio.py` + `tdgw --load`/`--dump`
-   move the field to/from the GPU (format interop-tested Python↔C++).
-3. Run protocol (a) end-to-end on the GPU (build → `tdgw --load --dump` quench → `tof.py`).
-   `tdgw` now logs `N0/N` and `K` (K>0 = inverse population); params `--U -2.2 --V0 -8e-4`.
-   Remaining: confirm the four BZ-corner peaks; optionally add the intermediate ramp (−138→−2.19).
-4. Triangular lattice — add `make_triangular()` (z=6, `J1=J3>J2`); kernels unchanged.
-5. 3D cubic 192³ — add `make_cubic()`, low-storage buffers. (Bipartite: no frustration.)
-
-## Modern C++/CUDA notes (changed since ~2014)
-
-- CMake treats CUDA as a first-class language (`enable_language(CUDA)`); no nvcc
-  Makefile hand-rolling.
-- `thrust::complex<float>` for device complex; Thrust/CUB for the `N_tot`/`E_tot`
-  reductions.
-- `compute-sanitizer` replaces `cuda-memcheck`; Nsight Compute/Systems for profiling.
-- CUDA Graphs amortise per-step launch overhead once step counts get large — a late
-  optimisation, not needed to start.
-
-## Getting the code
-
-```
-git clone https://github.com/rappakos/gutzwiller-cuda.git
-```
-
-The source-paper PDFs are intentionally not tracked (see `.gitignore`).
+   builds it (verified stationary, with the SF shell); `fieldio.py` + `tdgw --load`/`--dump
