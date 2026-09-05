@@ -4,6 +4,10 @@ A modern C++/CUDA revival of the time-dependent Gutzwiller (TDGW) mean-field
 dynamics of the Bose–Hubbard model. Personal research project. Sized for a
 6 GB RTX 2060 (Turing, sm_75).
 
+Older NVIDIA GPUs can still run it, but pre-Turing cards need an older toolkit:
+for example, a GTX 1050 Ti (Pascal, sm_61) builds and runs with CUDA 12.9 when
+configured with `-DCMAKE_CUDA_ARCHITECTURES=61`.
+
 Physics follows two papers by Á. Rapp:
 
 - **square lattice / negative-T** (the current target) — Phys. Rev. A **87**, 043611 (2013) [arXiv:1211.4350]
@@ -38,7 +42,7 @@ tests/stiff_regime_check.cpp    host-only split-step vs RK4 in the stiff U/J reg
 tests/split_step_prototype.cpp  host-only split-step numerics (predictor-corrector)
 analysis/tof.py                 time-of-flight image generator (numpy.fft, post-processing)
 analysis/make_gif.py            assemble a TOF-vs-time GIF from --dump-every frames
-CMakeLists.txt                  modern CMake; targets sm_75
+CMakeLists.txt                  modern CMake; defaults to sm_75, older GPUs override it
 ```
 
 ## Architecture decisions
@@ -157,6 +161,19 @@ Verified toolchain (Windows): CUDA Toolkit **13.3**, Visual Studio **2022** with
 and an NVIDIA RTX 2060 (Turing, sm_75) with a current driver. Python side: 3.10+ with
 `numpy` and `scipy` (a virtualenv is enough).
 
+Older GPU note: CUDA 13.x no longer emits code for pre-Turing architectures such
+as Pascal/Volta (`sm_61`, `sm_70`, `sm_72`). If your card is older than Turing,
+install a CUDA 12.x toolkit and pass the architecture explicitly at configure
+time. Example tested on Linux Mint 22.3 with a GTX 1050 Ti:
+
+```
+cmake -S . -B build \
+   -DCMAKE_BUILD_TYPE=Release \
+   -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc \
+   -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build -j
+```
+
 CUDA 13.x + MSVC note: Thrust/CCCL requires MSVC's standard-conforming preprocessor;
 `CMakeLists.txt` already forwards `/Zc:preprocessor`, so no manual step is needed.
 
@@ -173,6 +190,16 @@ cmake --build build --config Release
 .\build\Release\tdgw.exe --L 192 --D 12 --steps 20000 --dt 0.002
 .\build\Release\host_check.exe                      # CPU-only integrator check
 ```
+
+Windows, older GPU example (Pascal/Volta):
+
+```
+cmake -B build -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build --config Release
+```
+
+If that fails with `Unsupported gpu architecture 'compute_61'`, your `nvcc` is too
+new; install a CUDA 12.x toolkit and point CMake at that compiler.
 
 Python reference (inside a venv): `python reference\tdgw_reference.py`.
 
@@ -192,8 +219,26 @@ mkdir results
 python analysis\make_gif.py "results\frame_*.bin" --out results\tof.gif --fps 10
 ```
 
-Linux/macOS: `cmake --build build -j`, then `./build/tdgw --selftest`; the host-only
-tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
+Linux/macOS:
+
+```
+cmake -S . -B build
+cmake --build build -j
+./build/tdgw --selftest
+```
+
+Older Linux GPU example (GTX 1050 Ti / sm_61):
+
+```
+cmake -S . -B build \
+   -DCMAKE_BUILD_TYPE=Release \
+   -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc \
+   -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build -j
+./build/tdgw --selftest
+```
+
+The host-only tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
 
 Debugging/profiling: `compute-sanitizer` for races/OOB, `ncu` / `nsys` (Nsight) for
 kernel and timeline profiling.
