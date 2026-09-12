@@ -4,6 +4,10 @@ A modern C++/CUDA revival of the time-dependent Gutzwiller (TDGW) mean-field
 dynamics of the Bose–Hubbard model. Personal research project. Sized for a
 6 GB RTX 2060 (Turing, sm_75).
 
+Older NVIDIA GPUs can still run it, but pre-Turing cards need an older toolkit:
+for example, a GTX 1050 Ti (Pascal, sm_61) builds and runs with CUDA 12.9 when
+configured with `-DCMAKE_CUDA_ARCHITECTURES=61`.
+
 Physics follows two papers by Á. Rapp:
 
 - **square lattice / negative-T** (the current target) — Phys. Rev. A **87**, 043611 (2013) [arXiv:1211.4350]
@@ -39,7 +43,7 @@ tests/split_step_prototype.cpp  host-only split-step numerics (predictor-correct
 analysis/tof.py                 time-of-flight image generator (numpy.fft, post-processing)
 analysis/make_gif.py            assemble a TOF-vs-time GIF from --dump-every frames
 analysis/plot_diag.py           plot N0/N(t), K(t), R(t) from a captured tdgw run log
-CMakeLists.txt                  modern CMake; targets sm_75
+CMakeLists.txt                  modern CMake; defaults to sm_75, older GPUs override it
 ```
 
 ## Architecture decisions
@@ -180,6 +184,19 @@ Verified toolchain (Windows): CUDA Toolkit **13.3**, Visual Studio **2022** with
 and an NVIDIA RTX 2060 (Turing, sm_75) with a current driver. Python side: 3.10+ with
 `numpy` and `scipy` (a virtualenv is enough).
 
+Older GPU note: CUDA 13.x no longer emits code for pre-Turing architectures such
+as Pascal/Volta (`sm_61`, `sm_70`, `sm_72`). If your card is older than Turing,
+install a CUDA 12.x toolkit and pass the architecture explicitly at configure
+time. Example tested on Linux Mint 22.3 with a GTX 1050 Ti:
+
+```
+cmake -S . -B build \
+   -DCMAKE_BUILD_TYPE=Release \
+   -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc \
+   -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build -j
+```
+
 CUDA 13.x + MSVC note: Thrust/CCCL requires MSVC's standard-conforming preprocessor;
 `CMakeLists.txt` already forwards `/Zc:preprocessor`, so no manual step is needed.
 
@@ -196,6 +213,16 @@ cmake --build build --config Release
 .\build\Release\tdgw.exe --L 192 --D 12 --steps 20000 --dt 0.002
 .\build\Release\host_check.exe                      # CPU-only integrator check
 ```
+
+Windows, older GPU example (Pascal/Volta):
+
+```
+cmake -B build -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build --config Release
+```
+
+If that fails with `Unsupported gpu architecture 'compute_61'`, your `nvcc` is too
+new; install a CUDA 12.x toolkit and point CMake at that compiler.
 
 Python reference (inside a venv): `python reference\tdgw_reference.py`.
 
@@ -232,8 +259,26 @@ which for the isotropic lattice are the six corners of the hexagonal BZ at |k|�
 the anisotropy J1:J2:J3, sweeping J2 down from 1 toward the rhombic limit is the
 frustration study (`eps_max` climbs 3.0 → 4.0). Reference figure: `docs/tof_triangular_reference.png`.
 
-Linux/macOS: `cmake --build build -j`, then `./build/tdgw --selftest`; the host-only
-tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
+Linux/macOS:
+
+```
+cmake -S . -B build
+cmake --build build -j
+./build/tdgw --selftest
+```
+
+Older Linux GPU example (GTX 1050 Ti / sm_61):
+
+```
+cmake -S . -B build \
+   -DCMAKE_BUILD_TYPE=Release \
+   -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc \
+   -DCMAKE_CUDA_ARCHITECTURES=61
+cmake --build build -j
+./build/tdgw --selftest
+```
+
+The host-only tests build directly with `g++ -O2 -std=c++17 tests/<file>.cpp`.
 
 Debugging/profiling: `compute-sanitizer` for races/OOB, `ncu` / `nsys` (Nsight) for
 kernel and timeline profiling.
@@ -242,4 +287,28 @@ kernel and timeline profiling.
 
 1. ~~Exact-diagonal split-step integrator~~ — **done** (`--integrator splitstep`, default; midpoint-Φ predictor-corrector).
 2. ~~Compressed-Mott initial state + field I/O~~ — **done**: `reference/ground_state.py`
-   builds it (verified stationary, with the SF shell); `fieldio.py` + `tdgw --load`/`--dump
+   builds it (verified stationary, with the SF shell); `fieldio.py` + `tdgw --load`/`--dump`
+   move the field to/from the GPU (format interop-tested Python↔C++).
+3. Run protocol (a) end-to-end on the GPU (build → `tdgw --load --dump` quench → `tof.py`).
+   `tdgw` now logs `N0/N` and `K` (K>0 = inverse population); params `--U -2.2 --V0 -8e-4`.
+   Remaining: confirm the four BZ-corner peaks; optionally add the intermediate ramp (−138→−2.19).
+4. Triangular lattice — add `make_triangular()` (z=6, `J1=J3>J2`); kernels unchanged.
+5. 3D cubic 192³ — add `make_cubic()`, low-storage buffers. (Bipartite: no frustration.)
+
+## Modern C++/CUDA notes (changed since ~2014)
+
+- CMake treats CUDA as a first-class language (`enable_language(CUDA)`); no nvcc
+  Makefile hand-rolling.
+- `thrust::complex<float>` for device complex; Thrust/CUB for the `N_tot`/`E_tot`
+  reductions.
+- `compute-sanitizer` replaces `cuda-memcheck`; Nsight Compute/Systems for profiling.
+- CUDA Graphs amortise per-step launch overhead once step counts get large — a late
+  optimisation, not needed to start.
+
+## Getting the code
+
+```
+git clone https://github.com/rappakos/gutzwiller-cuda.git
+```
+
+The source-paper PDFs are intentionally not tracked (see `.gitignore`).
